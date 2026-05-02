@@ -6,8 +6,8 @@ on:
       - main
       - master
       - php81
-    tags:
-      - '*'
+    tags-ignore:
+      - '*.*.*'
     paths:
       - 'game/**'
   pull_request:
