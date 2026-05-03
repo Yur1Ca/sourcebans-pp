@@ -30,8 +30,7 @@ function api_auth_login(array $params): array
     $remember    = $rememberRaw === true || $rememberRaw === 'true';
     $redirect = (string)($params['redirect'] ?? '');
 
-    if (!Config::getBool('config.enablesteamlogin')) {
-        Log::add('w', 'Hacking attempt', 'Attempted to connect via Normal Auth when the feature is disabled.');
+    if (!Config::getBool('config.enablenormallogin')) {
         return Api::redirect('?p=login&m=failed');
     }
 
@@ -81,6 +80,10 @@ function api_auth_login(array $params): array
 
 function api_auth_lost_password(array $params): array
 {
+    if (!Config::getBool('config.enablenormallogin')) {
+        throw new ApiError('disabled', 'Normal login is disabled.');
+    }
+
     $email = (string)($params['email'] ?? '');
 
     $GLOBALS['PDO']->query("SELECT aid, user FROM `:prefix_admins` WHERE email = :email");
