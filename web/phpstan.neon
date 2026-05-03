@@ -1,0 +1,21 @@
+includes:
+    - phpstan-baseline.neon
+
+parameters:
+    level: 4
+    phpVersion: 80200
+    bootstrapFiles:
+        - includes/vendor/autoload.php
+        - phpstan-bootstrap.php
+    paths:
+        - .
+    excludePaths:
+        - includes/vendor/*
+        - includes/xajax.inc.php
+        - includes/xajaxResponse.inc.php
+        - includes/xajaxCompress.php
+        - includes/auth/openid.php
+        - includes/tinymce/*
+        - cache/*
+        - templates_c/*
+        - phpstan-bootstrap.php
