@@ -23,7 +23,8 @@ code change — never as a follow-up. CI doesn't gate this; it's on you.
 | Add/rename/remove a top-level subsystem in `web/includes/`  | `ARCHITECTURE.md` (Web panel → Directory layout, and the relevant subsystem section) |
 | Change a request lifecycle (page or JSON API)               | `ARCHITECTURE.md` (the lifecycle section + any diagrams) |
 | Add an API handler **topic file** (new file in `api/handlers/`) | `ARCHITECTURE.md` (handler list under "Handler registration") |
-| Add or rename a DB table, or change the schema substantively | `ARCHITECTURE.md` (Database schema table) + ensure `install/includes/sql/struc.sql` is the source of truth |
+| Add or rename a DB table, or change the schema substantively | `ARCHITECTURE.md` (Database schema table) + ensure `install/includes/sql/struc.sql` is the source of truth + paired `web/updater/data/<N>.php` registered in `store.json` |
+| Add or change a row in `install/includes/sql/data.sql` (e.g. new `sb_settings` key) | Paired migration in `web/updater/data/<N>.php` + register in `web/updater/store.json` (see "Updater migrations") |
 | Add or remove a quality gate / CI workflow                  | `ARCHITECTURE.md` (Quality gates) **and** `AGENTS.md` (Quality gates) |
 | Change a `./sbpp.sh` command surface                        | `AGENTS.md` (Dev commands) + `docker/README.md`       |
 | Introduce a new convention or pattern (e.g. View DTOs)      | `AGENTS.md` (Conventions) + `ARCHITECTURE.md` if it's an architectural shift |
@@ -81,6 +82,58 @@ request — no restart. Restart only when:
 
 - `composer.json` changed → `./sbpp.sh composer install`
 - anything in `docker/` changed → `./sbpp.sh rebuild`
+
+## Parallel stacks (subagents / multiple worktrees)
+
+`docker-compose.yml` ships hardcoded `container_name`s (`sbpp-web`,
+`sbpp-db`, `sbpp-adminer`, `sbpp-mailpit`) and lets `docker compose`
+derive the project name from the cwd basename. Every worktree of this
+repo has the same basename (`sourcebans-pp`), so two `./sbpp.sh up`
+invocations from different worktrees collide on **container names** (Docker
+rejects the second one), **host ports** (default `8080` / `8081` / `8025`
+/ `1025` / `3307`), **and the project's named volumes** (`dbdata`,
+`vendor`, `cache`, `smarty`) — they'd silently share/corrupt each
+other's DB state.
+
+If you're a subagent (or a human) running in a worktree alongside another
+stack, drop a worktree-local `docker-compose.override.yml` that scopes
+the project name, container names, and host ports to this worktree.
+`docker compose` auto-loads it on top of `docker-compose.yml` and the
+file is gitignored so it never sneaks into a PR:
+
+```yaml
+# docker-compose.override.yml — parallel-stack scaffolding for this worktree.
+name: sbpp-task-1109                # unique project name → unique volumes/network
+
+services:
+  web:
+    container_name: sbpp-1109-web
+    ports: !override
+      - "${SBPP_WEB_PORT:-8189}:80"
+  db:
+    container_name: sbpp-1109-db
+    ports: !override
+      - "${SBPP_DB_PORT:-3416}:3306"
+  adminer:
+    container_name: sbpp-1109-adminer
+    ports: !override
+      - "${SBPP_ADMINER_PORT:-9189}:8080"
+  mailpit:
+    container_name: sbpp-1109-mailpit
+    ports: !override
+      - "${SBPP_MAILPIT_UI_PORT:-10189}:8025"
+      - "${SBPP_MAILPIT_SMTP_PORT:-1134}:1025"
+```
+
+- The suffix (`1109` here) and host-port offsets are arbitrary — pick
+  a free range tied to the issue/PR/task you're working on so two
+  parallel agents don't collide on each other's overrides either.
+- `./sbpp.sh up` / `phpstan` / `test` / `mysql` continue to work
+  unchanged; `sbpp.sh` shells out to `docker compose` which composes
+  both YAMLs.
+- **Tear down before deleting the worktree.** `./sbpp.sh down` (or
+  `reset`) removes the named containers/volumes; otherwise they leak
+  and you'll discover orphan `sbpp-task-*_dbdata` volumes weeks later.
 
 ## Quality gates
 
@@ -142,6 +195,29 @@ API-contract specifics:
   `Database::query()` rewrites the placeholder. Never inline the prefix.
 - Pattern: `query` → `bind` → `execute` / `single` / `resultset`.
 - ADOdb was fully removed (commit `b9c812b2`). **Do not reintroduce it.**
+
+### Updater migrations
+
+Every change to `web/install/includes/sql/data.sql` (new `sb_settings` row,
+new seed) **and** every schema change in `struc.sql` needs a paired
+migration in `web/updater/data/<N>.php`, registered in
+`web/updater/store.json`. `data.sql` is consulted **only on fresh installs**;
+the updater scripts are how existing panels catch up. Adding a row to
+`data.sql` alone silently breaks every upgraded install — the two halves
+of the diff ship together or not at all.
+
+- Pick `<N>` as the next integer above the current max key in
+  `store.json`. Numbers are historical, not semantic.
+- Keep migrations **idempotent**: `INSERT IGNORE`, `CREATE TABLE IF NOT EXISTS`,
+  `ALTER TABLE … ADD COLUMN` guarded by an existence check. The runner
+  has no rollback — re-running must be a no-op.
+- Use the `:prefix_` placeholder. Never inline the prefix.
+- Defaults in the migration must match the defaults in `data.sql` so
+  fresh and upgraded installs converge to the same state.
+- The script is `require_once`'d inside the `Updater` instance scope, so
+  `$this->dbs` is in scope; PHPStan can't see this, so prefix each
+  `$this->dbs` call with `// @phpstan-ignore variable.undefined`. See
+  `web/updater/data/802.php` and `803.php` for the canonical shape.
 
 ### JSON API
 
@@ -230,6 +306,8 @@ API-contract specifics:
 - New `install/` flow → DB is seeded out-of-band in dev.
 - String literals for action names → `Actions.PascalName`.
 - Inlining the table prefix → use `:prefix_` and let `Database` rewrite.
+- Editing `install/includes/sql/data.sql` (or `struc.sql`) without a paired
+  `web/updater/data/<N>.php` → upgraded installs silently miss the change.
 
 ## Where to find what
 
@@ -245,5 +323,8 @@ API-contract specifics:
 | Auth / JWT cookie                      | `web/includes/auth/`                                     |
 | CSRF                                   | `web/includes/security/CSRF.php`                         |
 | Schema                                 | `web/install/includes/sql/struc.sql`                     |
+| Seed `sb_settings` rows for fresh installs | `web/install/includes/sql/data.sql`                  |
+| Add a one-off DB upgrade for existing installs | `web/updater/data/<N>.php` + `web/updater/store.json` |
 | Test fixtures                          | `web/tests/Fixture.php`, `web/tests/ApiTestCase.php`     |
+| Run a stack in parallel with another worktree | Worktree-local `docker-compose.override.yml` (see "Parallel stacks") |
 | Local dev stack details                | `docker/README.md`                                       |
