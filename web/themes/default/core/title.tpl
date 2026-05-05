@@ -51,11 +51,12 @@
         </button>
 
         <button type="button"
-                class="btn--ghost btn--icon"
+                class="btn btn--ghost btn--icon"
                 data-theme-toggle
                 data-testid="theme-toggle"
                 aria-label="Toggle color theme">
-            <i data-lucide="sun"></i>
+            <i data-lucide="sun"  class="theme-toggle__sun"></i>
+            <i data-lucide="moon" class="theme-toggle__moon"></i>
         </button>
     </header>
 
