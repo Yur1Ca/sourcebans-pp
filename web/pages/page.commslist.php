@@ -473,10 +473,12 @@ $BanCount = isset($res_count[0]['cnt']) ? (int) $res_count[0]['cnt'] : 0;
 if ($BansEnd > $BanCount) {
     $BansEnd = $BanCount;
 }
-if (!$res) {
-    echo "No Blocks Found.";
-    PageDie();
-}
+// Mirrors page.banlist.php: the redesigned page_comms.tpl renders its
+// own "No comm blocks match those filters." empty state inside the
+// table, so we let the template handle the empty case rather than
+// short-circuiting with PageDie() and dropping the marquee chrome.
+// PDO error mode is EXCEPTION, so a real SQL failure throws before
+// reaching this point.
 
 $view_comments = false;
 $bans          = [];
