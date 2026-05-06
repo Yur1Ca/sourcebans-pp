@@ -1,10 +1,34 @@
 <?php
 
-global $theme;
+global $theme, $userbank;
 
 use Sbpp\Mail\EmailType;
 use Sbpp\Mail\Mail;
 use Sbpp\Mail\Mailer;
+
+// Issue #1207 AUTH-1: a user trying to recover their password is by
+// definition logged out, so a logged-in admin (or any authenticated
+// visitor) reaching this URL should be sent home rather than rendering
+// the form with the admin sidebar leaking around it. Mirrors the
+// equivalent guard in page.login.php (which redirects logged-in users
+// to `index.php` so the form is never shown to them either).
+//
+// JS redirect rather than `header('Location:')` because this handler
+// runs INSIDE `build()` — `pages/core/header.php`,
+// `pages/core/navbar.php`, and `pages/core/title.php` have already
+// flushed ~9 KB of HTML (including the admin sidebar this guard exists
+// to suppress) by the time we get here. PHP's `header()` is a no-op
+// after output starts, so the redirect would silently fail and the
+// admin chrome leak the audit screenshot caught would still ship —
+// just with the form body missing on top, because `die()` halts
+// rendering mid-page. `page.login.php`'s 200-line-old equivalent
+// guard (`page.login.php:27-30`) uses the same JS redirect for the
+// same reason; mirror it here so the user-observable behaviour is
+// identical to the login surface.
+if ($userbank->is_logged_in()) {
+    echo "<script>window.location.href = 'index.php';</script>";
+    exit;
+}
 
 // Issue #1102: when normal login is disabled the entire password-recovery
 // flow is meaningless (a reset password can't be used to log in), and the
