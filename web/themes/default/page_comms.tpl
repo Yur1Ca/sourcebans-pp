@@ -208,12 +208,58 @@
                         </td>
                     </tr>
                 {foreachelse}
+                    {* #1207 empty-state unification — first-run vs filtered.
+                       `$is_filtered` flips on any of search / server / time /
+                       state / type / hide-inactive (see page.commslist.php
+                       for the predicate). With zero rows AND no filter we
+                       fall through to the first-run shape (CTA gated on
+                       `can_add_comm`); otherwise it stays "Clear filters". *}
                     <tr>
+                        {if $is_filtered}
                         <td colspan="9"
-                            style="text-align:center;padding:3rem;color:var(--text-muted)"
-                            data-testid="comms-empty">
-                            No comm blocks match those filters.
+                            style="padding:0"
+                            data-testid="comms-empty"
+                            data-filtered="true">
+                            <div class="empty-state">
+                                <span class="empty-state__icon" aria-hidden="true">
+                                    <i data-lucide="search-x" style="width:18px;height:18px"></i>
+                                </span>
+                                <h2 class="empty-state__title">No comm blocks match those filters</h2>
+                                <p class="empty-state__body">Try a different search term, server, or time range &mdash; or clear the active filters to see every recorded mute / gag.</p>
+                                <div class="empty-state__actions">
+                                    <a class="btn btn--secondary btn--sm"
+                                       href="?p=commslist"
+                                       data-testid="comms-empty-clear">
+                                        <i data-lucide="x" style="width:13px;height:13px"></i>
+                                        Clear filters
+                                    </a>
+                                </div>
+                            </div>
                         </td>
+                        {else}
+                        <td colspan="9"
+                            style="padding:0"
+                            data-testid="comms-empty"
+                            data-filtered="false">
+                            <div class="empty-state">
+                                <span class="empty-state__icon" aria-hidden="true">
+                                    <i data-lucide="mic-off" style="width:18px;height:18px"></i>
+                                </span>
+                                <h2 class="empty-state__title">No comm blocks recorded yet</h2>
+                                <p class="empty-state__body">Mutes and gags issued from the panel or in-game will appear here.</p>
+                                {if $can_add_comm}
+                                <div class="empty-state__actions">
+                                    <a class="btn btn--primary btn--sm"
+                                       href="?p=admin&amp;c=comms"
+                                       data-testid="comms-empty-add">
+                                        <i data-lucide="plus" style="width:13px;height:13px"></i>
+                                        Add a comm block
+                                    </a>
+                                </div>
+                                {/if}
+                            </div>
+                        </td>
+                        {/if}
                     </tr>
                 {/foreach}
             </tbody>
@@ -247,6 +293,42 @@
                     </div>
                     <i data-lucide="chevron-right"></i>
                 </a>
+            {foreachelse}
+                {* #1207: the desktop `<table>` is `display:none` on
+                   mobile (theme.css responsive block), so its empty
+                   row above never renders below 769px. Mirror the
+                   first-run-vs-filtered split here for phones. *}
+                {if $is_filtered}
+                <div class="empty-state" data-testid="comms-empty-mobile" data-filtered="true">
+                    <span class="empty-state__icon" aria-hidden="true">
+                        <i data-lucide="search-x" style="width:18px;height:18px"></i>
+                    </span>
+                    <h2 class="empty-state__title">No comm blocks match those filters</h2>
+                    <p class="empty-state__body">Try a different search term or clear the active filters.</p>
+                    <div class="empty-state__actions">
+                        <a class="btn btn--secondary btn--sm" href="?p=commslist">
+                            <i data-lucide="x" style="width:13px;height:13px"></i>
+                            Clear filters
+                        </a>
+                    </div>
+                </div>
+                {else}
+                <div class="empty-state" data-testid="comms-empty-mobile" data-filtered="false">
+                    <span class="empty-state__icon" aria-hidden="true">
+                        <i data-lucide="mic-off" style="width:18px;height:18px"></i>
+                    </span>
+                    <h2 class="empty-state__title">No comm blocks recorded yet</h2>
+                    <p class="empty-state__body">Mutes and gags issued from the panel or in-game will appear here.</p>
+                    {if $can_add_comm}
+                    <div class="empty-state__actions">
+                        <a class="btn btn--primary btn--sm" href="?p=admin&amp;c=comms">
+                            <i data-lucide="plus" style="width:13px;height:13px"></i>
+                            Add a comm block
+                        </a>
+                    </div>
+                    {/if}
+                </div>
+                {/if}
             {/foreach}
         </div>
     </div>

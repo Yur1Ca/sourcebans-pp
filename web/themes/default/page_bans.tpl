@@ -213,7 +213,49 @@
           </td>
         </tr>
         {foreachelse}
-        <tr><td colspan="9" style="text-align:center;padding:3rem;color:var(--text-muted)">No bans match those filters.</td></tr>
+        {* #1207 empty-state unification — first-run vs filtered.
+           `$is_filtered` is true whenever the request carries a search
+           term, an advSearch chip, or the hide-inactive toggle — see
+           page.banlist.php for the predicate. With zero rows AND no
+           filter active we fall through to the first-run shape (CTA
+           gated on `can_add_ban`). With a filter, the CTA stays
+           "Clear filters" and `data-filtered="true"` so tests can
+           disambiguate. *}
+        <tr>
+          <td colspan="9" style="padding:0">
+            {if $is_filtered}
+            <div class="empty-state" data-testid="banlist-empty" data-filtered="true">
+              <span class="empty-state__icon" aria-hidden="true">
+                <i data-lucide="search-x" style="width:18px;height:18px"></i>
+              </span>
+              <h2 class="empty-state__title">No bans match those filters</h2>
+              <p class="empty-state__body">Try a different search term or clear the active filters to see every recorded ban.</p>
+              <div class="empty-state__actions">
+                <a class="btn btn--secondary btn--sm" href="?p=banlist" data-testid="banlist-empty-clear">
+                  <i data-lucide="x" style="width:13px;height:13px"></i>
+                  Clear filters
+                </a>
+              </div>
+            </div>
+            {else}
+            <div class="empty-state" data-testid="banlist-empty" data-filtered="false">
+              <span class="empty-state__icon" aria-hidden="true">
+                <i data-lucide="ban" style="width:18px;height:18px"></i>
+              </span>
+              <h2 class="empty-state__title">No bans recorded yet</h2>
+              <p class="empty-state__body">Enforcement actions will show up here as soon as admins start moderating.</p>
+              {if $can_add_ban}
+              <div class="empty-state__actions">
+                <a class="btn btn--primary btn--sm" href="?p=admin&amp;c=bans" data-testid="banlist-empty-add">
+                  <i data-lucide="plus" style="width:13px;height:13px"></i>
+                  Add a ban
+                </a>
+              </div>
+              {/if}
+            </div>
+            {/if}
+          </td>
+        </tr>
         {/foreach}
       </tbody>
     </table>
@@ -244,7 +286,38 @@
         <span class="text-faint" aria-hidden="true">&rsaquo;</span>
       </a>
       {foreachelse}
-      <div style="text-align:center;padding:3rem;color:var(--text-muted)">No bans match those filters.</div>
+      {* Mobile mirror of the desktop empty above (first-run vs filtered). *}
+      {if $is_filtered}
+      <div class="empty-state" data-testid="banlist-empty-mobile" data-filtered="true">
+        <span class="empty-state__icon" aria-hidden="true">
+          <i data-lucide="search-x" style="width:18px;height:18px"></i>
+        </span>
+        <h2 class="empty-state__title">No bans match those filters</h2>
+        <p class="empty-state__body">Try a different search term or clear the active filters.</p>
+        <div class="empty-state__actions">
+          <a class="btn btn--secondary btn--sm" href="?p=banlist">
+            <i data-lucide="x" style="width:13px;height:13px"></i>
+            Clear filters
+          </a>
+        </div>
+      </div>
+      {else}
+      <div class="empty-state" data-testid="banlist-empty-mobile" data-filtered="false">
+        <span class="empty-state__icon" aria-hidden="true">
+          <i data-lucide="ban" style="width:18px;height:18px"></i>
+        </span>
+        <h2 class="empty-state__title">No bans recorded yet</h2>
+        <p class="empty-state__body">Enforcement actions will show up here as soon as admins start moderating.</p>
+        {if $can_add_ban}
+        <div class="empty-state__actions">
+          <a class="btn btn--primary btn--sm" href="?p=admin&amp;c=bans">
+            <i data-lucide="plus" style="width:13px;height:13px"></i>
+            Add a ban
+          </a>
+        </div>
+        {/if}
+      </div>
+      {/if}
       {/foreach}
     </div>
   </div>
