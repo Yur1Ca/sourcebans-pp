@@ -36,7 +36,20 @@
             </p>
         </div>
         <div class="flex gap-2">
+            {* #1230: aria-pressed reflects whether inactive blocks
+               are currently being hidden (binary state, not a
+               one-shot action). Pair: .btn--secondary[aria-pressed="true"]
+               in theme.css.
+
+               role="button" makes aria-pressed a valid attribute
+               on the <a> per WAI-ARIA (the toggle is functionally
+               a button — the href is the no-JS progressive-
+               enhancement fallback). Without this role axe's
+               aria-allowed-attr rule fires "ARIA attribute is not
+               allowed: aria-pressed". *}
             <a class="btn btn--secondary btn--sm"
+               role="button"
+               aria-pressed="{if $hide_inactive}true{else}false{/if}"
                href="{$hide_inactive_toggle_url|escape}"
                data-testid="toggle-hide-inactive">
                 <i data-lucide="{if $hide_inactive}eye{else}eye-off{/if}"></i>
@@ -421,7 +434,14 @@
         </div>
     </div>
 
-    {* -- Pagination --------------------------------------------------- *}
+    {* -- Pagination ---------------------------------------------------
+         #1225: short-circuit on a zero result count so the
+         "Showing 0–0 of 0" shell doesn't render below the empty
+         state on a fresh install. The empty state already owns the
+         "this list is empty" message; the pagination card is dead
+         chrome at total=0. Pair: page.commslist.php sets
+         $ban_nav = '' for the legacy theme contract. *}
+    {if $pagination.total > 0}
     <div class="flex items-center justify-between text-xs text-muted" data-testid="comms-pagination">
         <div>
             Showing
@@ -460,6 +480,7 @@
             {/if}
         </div>
     </div>
+    {/if}
 
     {* `searchlink` is the URL fragment (e.g. `&searchText=foo`) the
        handler builds to preserve the active query across navigation.
