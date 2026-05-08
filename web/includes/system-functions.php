@@ -81,7 +81,7 @@ function SmFlagsToSb($flagstring)
     }
 
     foreach ($flags as $flag) {
-        if (strstr($flagstring, $flag['value']) || strstr($flagstring, 'z')) {
+        if (str_contains($flagstring, $flag['value']) || str_contains($flagstring, 'z')) {
             $out[] = $flag['display'];
         }
     }
@@ -140,8 +140,8 @@ function SecondsToString($sec, $textual=true)
         return 'Session';
     }
     if ($textual) {
-        $div = array( 2592000, 604800, 86400, 3600, 60, 1 );
-        $desc = array('mo','wk','d','hr','min','sec');
+        $div = [2592000, 604800, 86400, 3600, 60, 1];
+        $desc = ['mo', 'wk', 'd', 'hr', 'min', 'sec'];
         $ret = null;
         foreach ($div as $index => $value) {
             $quotent = floor($sec / $value); //greatest whole integer
@@ -321,7 +321,7 @@ function sizeFormat($bytes)
  *
  * @param  int   $sid
  * @param  array $steamids
- * @return array array('STEAM_ID_1' => array('name' => $name, 'steam' => $steam, 'ip' => $ip, 'time' => $time, 'ping' => $ping), 'STEAM_ID_2' => []....)
+ * @return array<string, array{name: string, steam: string, ip: string}> Keyed by Steam2 id, e.g. ['STEAM_0:0:1' => ['name' => …, 'steam' => …, 'ip' => …], …].
  */
 function checkMultiplePlayers(int $sid, array $steamids)
 {
