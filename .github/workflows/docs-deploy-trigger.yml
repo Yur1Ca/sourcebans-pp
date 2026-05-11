@@ -5,18 +5,26 @@
 # Cadence: only on push to main with a docs/** path filter. PRs use
 # docs-build.yml to validate; this workflow is the production trigger.
 #
-# Required repo configuration BEFORE this workflow can succeed (one-time
-# cutover steps documented in #1333 cutover steps 1-2):
+# Required repo configuration BEFORE this workflow does anything (one-time
+# cutover step):
 #
-#   - Create the `sbpp-docs-deploy` GitHub App (org-owned), scope
-#     `Actions: write` on `sbpp.github.io` only, install on
-#     `sbpp/sbpp.github.io`.
-#   - Repo VARIABLE  `DOCS_DEPLOY_APP_ID`   = the App's numeric ID.
-#   - Repo SECRET    `DOCS_DEPLOY_APP_KEY`  = the App's PEM private key.
+#   - Create a fine-grained PAT scoped to `sbpp/sbpp.github.io` only,
+#     with the `Actions: Read and write` repository permission. (Classic
+#     PATs work too, but the fine-grained variant is strictly narrower
+#     and the right default.) Max expiry is one year — set a calendar
+#     reminder to rotate.
+#   - Repo SECRET `DOCS_DEPLOY_PAT` = the token value.
 #
-# Until those land, this workflow will fail on the first run with an
-# auth error. That's expected; the deploy shell in sbpp.github.io
-# also has a workflow_dispatch trigger as a manual fallback.
+# Until `DOCS_DEPLOY_PAT` is set, the dispatch step below is skipped via
+# its `if: secrets.DOCS_DEPLOY_PAT != ''` guard — every push to `docs/**`
+# shows up as a green run with the dispatch step marked "Skipped",
+# instead of red-failing on a missing credential. This stops the
+# original anti-pattern (#1339-followup) where the dispatch hard-erred
+# and an operator who hasn't done the cutover yet sees a stream of
+# confusing failures.
+#
+# The deploy shell in sbpp.github.io also has a `workflow_dispatch`
+# trigger as a manual fallback while the PAT is pending.
 
 name: docs-deploy-trigger
 
@@ -44,22 +52,21 @@ jobs:
     permissions: {}
 
     steps:
-      - name: Mint installation token via GitHub App
-        id: mint-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ vars.DOCS_DEPLOY_APP_ID }}
-          private-key: ${{ secrets.DOCS_DEPLOY_APP_KEY }}
-          owner: sbpp
-          repositories: sbpp.github.io
-
       # The dispatched workflow in sbpp.github.io listens for
       # `event_type: docs-changed`. The client_payload carries the
-      # commit SHA and ref so the deploy job can stamp it into the
-      # site footer / build manifest if it wants.
+      # commit SHA and ref so the deploy job can pin its sourcebans-pp
+      # checkout to the exact commit that fired the dispatch (race
+      # guard for back-to-back pushes).
+      #
+      # Step-level `if:` evaluates against `secrets.*` (job-level `if:`
+      # does not), so we gate the dispatch directly on the PAT being
+      # configured — no separate feature-flag variable needed. When
+      # `DOCS_DEPLOY_PAT` is unset, the step is skipped and the run is
+      # green-with-skipped instead of red-failing.
       - name: Dispatch repository_dispatch into sbpp.github.io
+        if: secrets.DOCS_DEPLOY_PAT != ''
         env:
-          GH_TOKEN: ${{ steps.mint-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.DOCS_DEPLOY_PAT }}
         run: |
           gh api repos/sbpp/sbpp.github.io/dispatches \
             --method POST \
