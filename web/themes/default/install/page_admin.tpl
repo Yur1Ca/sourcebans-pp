@@ -20,12 +20,31 @@
     </div>
 {/if}
 
+{*
+    Issue #1335 M3 review: pre-review the form carried `novalidate`,
+    which switched off the browser's pre-submit checks for
+    `required` / `minlength` / `pattern` / `type="email"` and
+    shifted the load to the page-tail JS. That violated AGENTS.md's
+    install-wizard rule that "the form's native `required` /
+    `pattern` attributes must be the load-bearing gate, with JS as
+    the UX polish" — and the JS only covered SteamID + email +
+    password-match, so empty fields and short passwords still
+    bounced server-side and wiped both passwords on re-render.
+
+    Post-review: native attrs are load-bearing again. The browser
+    surfaces popovers for empty / short / pattern-mismatch / type-
+    mismatch cases before our submit handler runs; the handler
+    only covers cross-field password matching (the one validation
+    native HTML can't express). Server-side stays the load-bearing
+    gate for JS-disabled clients, but the round-trip-with-wiped-
+    passwords path is now off the happy path for every input
+    failure.
+*}
 <form method="post"
       action="?step=5"
       id="install-admin-form"
       data-testid="install-admin-form"
-      autocomplete="off"
-      novalidate>
+      autocomplete="off">
     <input type="hidden" name="postd"    value="1">
     <input type="hidden" name="server"   value="{$val_server}">
     <input type="hidden" name="port"     value="{$val_port}">
@@ -127,23 +146,43 @@
 <script>
 (function () {
     'use strict';
+    // Issue #1335 M3 (post-review): the form is now native-validated
+    // (no `novalidate`), so the browser handles empty / short /
+    // pattern-mismatch / type-mismatch cases before this handler
+    // runs. The one validation native HTML can't express on its
+    // own is cross-field password matching (`pass1.value ===
+    // pass2.value`), so that's all this handler covers.
+    //
+    // The reason this still matters: pre-fix, every server-side
+    // validation failure wiped both password fields on the
+    // re-render (the values can't be echoed back into the template
+    // — `autocomplete="new-password"` blocks browser autofill, and
+    // bouncing them through a hidden input would leak them through
+    // any rendered HTML the operator's browser caches). Catching
+    // the mismatch client-side keeps that round-trip off the
+    // happy path. Server-side `page.5.php` stays the load-bearing
+    // gate for JS-disabled clients.
     var form  = document.getElementById('install-admin-form');
     var pass1 = document.getElementById('install-admin-pass1');
     var pass2 = document.getElementById('install-admin-pass2');
     if (!form || !pass1 || !pass2) return;
 
     form.addEventListener('submit', function (e) {
+        // Native validation has already cleared every other field
+        // (required filled, minlength met, pattern matches, type
+        // shape valid). If we land here, the only remaining failure
+        // mode is the password-match check.
         if (pass1.value !== pass2.value) {
-            e.preventDefault();
             pass2.setCustomValidity('Passwords do not match.');
             pass2.reportValidity();
+            e.preventDefault();
         } else {
             pass2.setCustomValidity('');
         }
     });
 
-    pass2.addEventListener('input', function () {
-        pass2.setCustomValidity('');
-    });
+    // Clear the custom validity on input so a corrected pass2
+    // doesn't keep firing the popover after the user fixes it.
+    pass2.addEventListener('input', function () { pass2.setCustomValidity(''); });
 })();
 </script>

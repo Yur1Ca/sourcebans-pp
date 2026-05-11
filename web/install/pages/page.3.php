@@ -152,18 +152,26 @@ $fsTargets = [
     'mod icon folder'      => $panelRoot . 'images/games',
     'map image folder'     => $panelRoot . 'images/maps',
 ];
+// Issue #1335 M2: pre-fix the detail string for a missing or
+// non-writable folder was just `'Missing: <path>'` /
+// `'Not writable: <path>'` with no remediation hint. Combined with
+// the README never mentioning writable folders (#1335 m7), a
+// non-technical operator could stall here with no actionable next
+// step. `sbpp_install_describe_filesystem_check()` pairs each
+// failure shape with the right remediation: chmod for non-writable
+// (paired with the README's m7 signpost so the two surfaces stay in
+// sync), re-upload-from-zip for missing (#1335 review: the release
+// tarball ships every placeholder dir, so missing ⇒ partial
+// upload, not a permission problem).
 foreach ($fsTargets as $label => $path) {
     $writable = is_writable($path);
     $exists   = is_dir($path);
     $status   = $exists && $writable ? 'ok' : 'err';
-    $detail   = !$exists
-        ? 'Missing: ' . $path
-        : ($writable ? 'Writable' : 'Not writable: ' . $path);
     $fsRows[] = [
         'label'    => ucfirst($label),
         'required' => 'Writable',
         'status'   => $status,
-        'detail'   => $detail,
+        'detail'   => sbpp_install_describe_filesystem_check($path, $exists, $writable),
     ];
     if ($status === 'err') {
         $errors++;
