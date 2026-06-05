@@ -17,6 +17,14 @@ Legend:
 > Custom themes that forked the pre-2.0 default keep working but
 > render in a compatibility mode; see the migration notes in the
 > release for details.
+>
+> **The web panel licence has changed** from CC BY-NC-SA 3.0 to the
+> Elastic License 2.0. Hobby / community self-hosting stays free
+> (most operators see no operational change). Offering SourceBans++
+> to third parties as a hosted or managed service is now reserved
+> by ELv2 and needs a separate commercial licence. SourceMod
+> plugins remain GPLv3. Full breakdown:
+> [Upgrading 1.8 → 2.0 — Licence change](https://sbpp.github.io/updating/1-8-to-2-0/#licence-change).
 ```
 01. * Rebuilt default theme: drawer-based admin nav, command palette
         (Ctrl/Cmd-K), light/dark/system theming, accessibility-first
@@ -93,6 +101,21 @@ Legend:
         `AGENTS.md` (workflow / conventions) live alongside
         `README.md`; user-facing install / upgrade / configure
         guides moved to the Starlight site at sbpp.github.io
+36. • SourceMod native API epoch: `MAJOR_REVISION` / `MINOR_REVISION` and
+        `SB_VERSION` live in generated `include/sbpp_version.inc`
+        (`scripts/resolve-plugin-version.sh` — release CI tag via
+        `SBPP_RELEASE_VERSION`, then `configs/version.json` →
+        `git describe` → `dev` like the panel; `MINOR_REVISION` is the
+        native API additive counter, not panel semver minor). Direct
+        `spcomp` builds use the checked-in `dev` fallback or run the
+        script locally. New `SOURCEBANSPP_VERSION_MAJOR` for optional
+        compile-time guards. Third-party plugins need a rebuild only when
+        they use checker library
+        detection (`"sourcechecker++"`, not `"sourcebans++"` — #1034), new
+        checker mute/gag natives (#1032), or hook
+        `SBPP_OnClientPostAdminCheck` (#1431). Plugins that only call
+        existing SBPP ban/report forwards/natives can usually keep their
+        existing `.smx`. ([#1114](https://github.com/sbpp/sourcebans-pp/issues/1114))
 ```
 
 ### Privacy
@@ -109,7 +132,7 @@ fresh one. The complete field list lives in the code at
 [`web/includes/Telemetry/schema-1.lock.json`](web/includes/Telemetry/schema-1.lock.json);
 the upgrade-time disclosure (and self-hosted-collector escape hatch)
 lives on the docs site at
-[Upgrading from 1.8.x to 2.0.x](https://sbpp.github.io/updating/1.8-to-2.0/#telemetry).
+[Upgrading from 1.8.x to 2.0.x](https://sbpp.github.io/updating/1-8-to-2-0/#anonymous-telemetry).
 Companion Worker repo: [sbpp/cf-analytics](https://github.com/sbpp/cf-analytics).
 
 (10/11/24): Version 1.8.1 (**Run updater required**)

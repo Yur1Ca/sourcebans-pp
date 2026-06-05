@@ -354,9 +354,24 @@
             // around what's effectively a "fan a single command out
             // to every enabled server and close" interaction.
             //
+            // The `&mode=kick` query param (#1439) tells the
+            // chromeless kickit page (and the JSON action it fans out
+            // through) that this is a kick-only flow — no ban row
+            // exists. The handler then (a) skips the
+            // `:prefix_bans` UPDATE that would otherwise re-attribute
+            // any of the player's existing active bans to whatever
+            // server happened to answer first, and (b) emits the
+            // "You have been kicked from this server" rcon message
+            // instead of the post-ban "You have been banned by this
+            // server, check $domain for more info" (which would lie
+            // to a player who's actually free to rejoin — the
+            // user-reported #1439 symptom). The post-ban flow on
+            // `admin.bans.php` deliberately doesn't pass `mode`, so
+            // it falls through to the default 'ban' branch.
+            //
             // Ban / Block both route through the panel-chromed
-            // smart-default URLs (`?p=admin&c=bans&section=add-ban&steam=…&type=0`
-            // / `?p=admin&c=comms&steam=…&type=0`) because they
+            // smart-default URLs (`?p=admin&c=bans&section=add-ban&steam=…&type=0&name=…`
+            // / `?p=admin&c=comms&steam=…&type=0&name=…`) because they
             // populate a multi-field form the admin reviews and
             // submits — that form is a panel surface in its own
             // right (admin.bans.php's `add-ban` section,
@@ -381,17 +396,36 @@
             // still iframes it from the Block-Added success branch,
             // same as `pages/admin.kickit.php` for the post-BansAdd
             // fan-out.
+            //
+            // Issue #1440: the `&name=…` arm pre-fills the form's
+            // Nickname input alongside the SteamID one. We only
+            // append the parameter when `name` is non-empty so the
+            // URL stays clean for bot / unmatched-row cases (the
+            // hydration helper guards `data-name` against empty
+            // values at the row layer — see `server-tile-hydrate.js`'s
+            // `renderPlayers` — so this is belt-and-braces, but
+            // cheap to enforce here too). `encodeURIComponent` is
+            // the right encoder for URL query-parameter values
+            // (escapes `&` / `=` / `?` / `#`); the server-side
+            // sanitisation contract (strip control chars + bidi
+            // overrides, validate UTF-8, cap at 128 codepoints)
+            // lives in `Sbpp\Util\PlayerName::sanitisePrefill`.
+            // Kick stays nameless: `pages/admin.kickit.php` is
+            // a chromeless iframe-only surface with no nickname
+            // input, so the parameter would be inert noise.
+
             menu.appendChild(buildRow({
                 label: 'Kick player',
                 icon: 'log-out',
-                href: 'pages/admin.kickit.php?check=' + encodeURIComponent(steamid) + '&type=0',
+                href: 'pages/admin.kickit.php?check=' + encodeURIComponent(steamid) + '&type=0&mode=kick',
                 testid: 'context-menu-kick',
             }));
 
+            var nameParam = name !== '' ? '&name=' + encodeURIComponent(name) : '';
             menu.appendChild(buildRow({
                 label: 'Ban player',
                 icon: 'gavel',
-                href: 'index.php?p=admin&c=bans&section=add-ban&steam=' + encodeURIComponent(steamid) + '&type=0',
+                href: 'index.php?p=admin&c=bans&section=add-ban&steam=' + encodeURIComponent(steamid) + '&type=0' + nameParam,
                 testid: 'context-menu-ban',
             }));
 
@@ -407,7 +441,7 @@
             menu.appendChild(buildRow({
                 label: 'Block comms',
                 icon: 'mic-off',
-                href: 'index.php?p=admin&c=comms&steam=' + encodeURIComponent(steamid) + '&type=0',
+                href: 'index.php?p=admin&c=comms&steam=' + encodeURIComponent(steamid) + '&type=0' + nameParam,
                 testid: 'context-menu-block',
             }));
         }

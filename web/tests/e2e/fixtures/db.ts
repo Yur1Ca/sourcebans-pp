@@ -35,6 +35,8 @@ const SEED_ANNOUNCEMENTS_INSIDE_CONTAINER =
     '/var/www/html/web/tests/e2e/scripts/seed-announcements-e2e.php';
 const SEED_LOSTPASSWORD_INSIDE_CONTAINER =
     '/var/www/html/web/tests/e2e/scripts/seed-lostpassword-e2e.php';
+const SEED_LOSTPASSWORD_ENUM_ADMIN_INSIDE_CONTAINER =
+    '/var/www/html/web/tests/e2e/scripts/seed-lostpassword-enum-admin-e2e.php';
 const SET_SETTING_INSIDE_CONTAINER =
     '/var/www/html/web/tests/e2e/scripts/set-setting-e2e.php';
 const ORPHAN_BAN_AID_INSIDE_CONTAINER =
@@ -43,6 +45,10 @@ const SEED_SERVER_GROUP_INSIDE_CONTAINER =
     '/var/www/html/web/tests/e2e/scripts/seed-server-group-e2e.php';
 const DELETE_SERVER_INSIDE_CONTAINER =
     '/var/www/html/web/tests/e2e/scripts/delete-server-e2e.php';
+const CLEAR_TEST_EMAIL_THROTTLE_INSIDE_CONTAINER =
+    '/var/www/html/web/tests/e2e/scripts/clear-test-email-throttle-e2e.php';
+const SEED_SYSTEM_LOG_INSIDE_CONTAINER =
+    '/var/www/html/web/tests/e2e/scripts/seed-system-log-e2e.php';
 
 /**
  * Run the PHP shim that drives `Sbpp\Tests\Fixture` against
@@ -300,6 +306,65 @@ export async function seedLostpasswordE2e(): Promise<LostpasswordSeed> {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(
             `seed-lostpassword-e2e.php: malformed stdout (${msg})\nstdout:\n${trimmed}\nstderr:\n${stderr}`,
+        );
+    }
+}
+
+/**
+ * Shape of the `seedLostpasswordEnumAdminE2e` return value.
+ *
+ * Only `email` is exposed — the form-POST tests don't need a
+ * password / token because they never log in as the seeded user
+ * and the handler rolls a fresh `validate` on every match.
+ */
+export interface LostpasswordEnumAdminSeed {
+    email: string;
+}
+
+/**
+ * Seed a dedicated admin row whose validate column can be freely
+ * rolled by the `api_auth_lost_password` handler (#1456 form-POST
+ * E2E tests).
+ *
+ * The seeded user lives separately from `admin@example.test` so
+ * the form-POST specs can drive the match branch — which UPDATEs
+ * `:prefix_admins.validate` — without racing the marquee #1403
+ * happy-path test, which seeds `admin@example.test`'s validate
+ * column to a known token and `GET`s a URL keyed on it. Cross-
+ * project (chromium ⇄ mobile-chromium) Playwright runs are
+ * intrinsically parallel even with `test.describe.configure({
+ * mode: 'serial' })` (serial is within-project), so the two
+ * tests would otherwise race on the same row.
+ *
+ * See `web/tests/e2e/scripts/seed-lostpassword-enum-admin-e2e.php`
+ * for the per-row contract (idempotent `INSERT IGNORE`, low-
+ * privilege, unguessable password).
+ */
+export async function seedLostpasswordEnumAdminE2e(): Promise<LostpasswordEnumAdminSeed> {
+    const inContainer = process.env.E2E_IN_CONTAINER === '1';
+    const cmd = inContainer ? 'php' : 'docker';
+    const cmdArgs = inContainer
+        ? [SEED_LOSTPASSWORD_ENUM_ADMIN_INSIDE_CONTAINER]
+        : ['compose', 'exec', '-T', 'web', 'php', SEED_LOSTPASSWORD_ENUM_ADMIN_INSIDE_CONTAINER];
+
+    const { stdout, stderr } = await execFileP(cmd, cmdArgs, {
+        maxBuffer: 1 * 1024 * 1024,
+        cwd: inContainer ? undefined : process.cwd(),
+    });
+    const trimmed = stdout.trim();
+    if (trimmed === '') {
+        throw new Error(`seed-lostpassword-enum-admin-e2e.php: empty stdout\nstderr:\n${stderr}`);
+    }
+    try {
+        const parsed = JSON.parse(trimmed) as LostpasswordEnumAdminSeed;
+        if (typeof parsed.email !== 'string') {
+            throw new Error('missing email key');
+        }
+        return parsed;
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+            `seed-lostpassword-enum-admin-e2e.php: malformed stdout (${msg})\nstdout:\n${trimmed}\nstderr:\n${stderr}`,
         );
     }
 }
@@ -617,5 +682,117 @@ async function runAnnouncementsHelper(
                 + `stdout:\n${stdout}\nstderr:\n${stderr}`,
             ));
         });
+    });
+}
+
+/**
+ * Per-row shape consumed by `seedSystemLogE2e` (#1462). Mirrors the
+ * `:prefix_log` schema: `type` is the audit letter code
+ * (`m`=message, `w`=warning, `e`=error — matches `LogType`). Every
+ * field except `type` carries a string default — the spec just
+ * needs at least one row to exist so the `{if count($log_items) > 0}`
+ * gate in `page_admin_settings_logs.tpl` paints SOMETHING, and the
+ * mobile-card / desktop-table parity assertion can run.
+ */
+export interface SystemLogSeedRow {
+    type?: 'm' | 'w' | 'e';
+    title?: string;
+    message?: string;
+    function?: string;
+    query?: string;
+    host?: string;
+}
+
+/**
+ * Seed `:prefix_log` rows directly so the System Log sub-tab
+ * (`?p=admin&c=settings&section=logs`) actually paints log entries
+ * instead of the empty "No log entries." placeholder. The e2e DB's
+ * `:prefix_log` table is empty by default (`data.sql` doesn't ship
+ * audit rows + `Fixture::truncateAndReseed` truncates every table on
+ * reset) and there is no JSON action that emits audit rows directly
+ * — they're side effects of authenticated panel writes. Driving e.g.
+ * `Actions.BansAdd` to produce a row would couple the System Log
+ * spec to the bans-add audit message, so the direct INSERT is the
+ * narrow shape the spec needs.
+ *
+ * Caller responsibility: invoke after `truncateE2eDb()` so the
+ * seeded rows are the only ones the spec sees. Mirrors the
+ * `seedCommsRawE2e` shape (shell-out + stdin-JSON).
+ *
+ * Returns the list of inserted `lid` values (in insert order) so
+ * the spec can target a specific row via `[data-id="<lid>"]`.
+ */
+export async function seedSystemLogE2e(rows: SystemLogSeedRow[]): Promise<number[]> {
+    const inContainer = process.env.E2E_IN_CONTAINER === '1';
+    const cmd = inContainer ? 'php' : 'docker';
+    const cmdArgs = inContainer
+        ? [SEED_SYSTEM_LOG_INSIDE_CONTAINER]
+        : ['compose', 'exec', '-T', 'web', 'php', SEED_SYSTEM_LOG_INSIDE_CONTAINER];
+
+    const child = execFile(cmd, cmdArgs, {
+        maxBuffer: 8 * 1024 * 1024,
+        cwd: inContainer ? undefined : process.cwd(),
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); });
+    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+
+    child.stdin?.write(JSON.stringify(rows));
+    child.stdin?.end();
+
+    await new Promise<void>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('exit', (code) => {
+            if (code === 0) {
+                resolve();
+                return;
+            }
+            reject(new Error(
+                `seed-system-log-e2e.php exited ${code}\n`
+                + `stdout:\n${stdout}\nstderr:\n${stderr}`,
+            ));
+        });
+    });
+
+    const trimmed = stdout.trim();
+    if (trimmed === '') {
+        throw new Error(`seed-system-log-e2e.php: empty stdout\nstderr:\n${stderr}`);
+    }
+    try {
+        const parsed = JSON.parse(trimmed) as { lids: number[] };
+        if (!Array.isArray(parsed.lids)) {
+            throw new Error('missing lids key');
+        }
+        return parsed.lids;
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+            `seed-system-log-e2e.php: malformed stdout (${msg})\nstdout:\n${trimmed}\nstderr:\n${stderr}`,
+        );
+    }
+}
+
+/**
+ * Clear the `system.test_email` rate-limit cache file (#1455).
+ *
+ * The handler limits 1 send per 10s per install via a single file at
+ * `SB_CACHE/test-email-throttle`. The throttle is install-global
+ * (not per-recipient or per-test), so parallel Playwright project
+ * profiles colliding on the happy-path test trip each other's
+ * 10s window. Reset before each happy-path arm to stay
+ * deterministic. Idempotent (no-op when the file is absent).
+ */
+export async function clearTestEmailThrottleE2e(): Promise<void> {
+    const inContainer = process.env.E2E_IN_CONTAINER === '1';
+    const cmd = inContainer ? 'php' : 'docker';
+    const cmdArgs = inContainer
+        ? [CLEAR_TEST_EMAIL_THROTTLE_INSIDE_CONTAINER]
+        : ['compose', 'exec', '-T', 'web', 'php', CLEAR_TEST_EMAIL_THROTTLE_INSIDE_CONTAINER];
+
+    await execFileP(cmd, cmdArgs, {
+        maxBuffer: 1 * 1024 * 1024,
+        cwd: inContainer ? undefined : process.cwd(),
     });
 }

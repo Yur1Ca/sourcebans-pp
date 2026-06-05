@@ -29,11 +29,41 @@
 #endif
 #define _sourcebanspp_included
 
-#define SB_VERSION_MAJOR "1"
-#define SB_VERSION_MINOR "9"
-#define SB_VERSION_PATCH "0"
-
-#define SB_VERSION   SB_VERSION_MAJOR..."."...SB_VERSION_MINOR..."."...SB_VERSION_PATCH
+// -------------------------------------------------------------------------
+// Native API revision (aligned with SourceBans++ 2.0 panel / plugin release)
+// -------------------------------------------------------------------------
+//
+// MAJOR_REVISION tracks the documented native API epoch (2 = 2.0 line).
+// Bump MAJOR only when a change requires third-party plugins to recompile
+// (removed/changed native signatures, removed forwards). Bump MINOR for
+// additive natives/forwards that old .smx files can ignore at runtime.
+//
+// 2.0 epoch (this header):
+//   sourcebanspp.inc — library "sourcebans++" (sbpp_main.smx)
+//     Additive: forward SBPP_OnClientPostAdminCheck (#1431).
+//     Unchanged: SBPP_BanPlayer; SBBanPlayer remains deprecated.
+//     Existing third-party .smx that only use prior natives/forwards
+//     generally keep working without a rebuild.
+//
+//   sourcebanschecker.inc — RegPluginLibrary "sourcechecker++" (#1034)
+//     Recompile / update detection if you #include checker and use
+//     LibraryExists/GetFeatureStatus: was "sourcebans++", now
+//     "sourcechecker++". Additive natives: SBPP_CheckerGetClientsMutes,
+//     SBPP_CheckerGetClientsGags (#1032); require sbpp_checker.smx that
+//     implements them if you call those natives.
+//
+// Optional compile-time guard (add to your plugin if you ship against
+// this header and want a hard fail when the epoch drifts):
+//
+//   #if SOURCEBANSPP_VERSION_MAJOR != 2
+//   #error Rebuild against SourceBans++ 2.0 sourcebanspp.inc
+//   #endif
+//
+// Version constants — scripts/resolve-plugin-version.sh writes
+// include/sbpp_version.inc (release tag → configs/version.json →
+// git describe → "dev"; mirrors Sbpp\Version::resolve). Checked-in
+// fallback supports direct spcomp; release/plugin-build CI regenerates.
+#include <sbpp_version>
 
 public SharedPlugin __pl_sourcebanspp =
 {

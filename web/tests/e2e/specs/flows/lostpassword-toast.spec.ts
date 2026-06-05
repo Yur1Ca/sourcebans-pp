@@ -81,7 +81,31 @@
  */
 
 import { expect, test } from '../../fixtures/auth.ts';
-import { seedLostpasswordE2e } from '../../fixtures/db.ts';
+import { seedLostpasswordE2e, seedLostpasswordEnumAdminE2e } from '../../fixtures/db.ts';
+
+// #1456 cross-test isolation: the marquee #1403 test seeds the
+// `admin@example.test` row's `:prefix_admins.validate` column to a
+// known token then GETs a URL keyed on it. The form-POST tests at
+// the tail of this file call `api_auth_lost_password` which UPDATEs
+// the matched admin's `validate` to a fresh random value. Two
+// safeguards keep these from racing:
+//
+//   1. The form-POST tests seed (and exclusively target) a DEDICATED
+//      admin row (`lostpw-enum-known@example.test`, see
+//      `seedLostpasswordEnumAdminE2e`). Hitting the same `validate`
+//      column as the marquee test would otherwise produce a cross-
+//      project flake — Playwright runs the same spec under both
+//      `chromium` and `mobile-chromium` IN PARALLEL by default, and
+//      `test.describe.configure({ mode: 'serial' })` only constrains
+//      within a single project's worker. The dedicated row sidesteps
+//      the race at the data layer rather than the scheduler layer.
+//   2. We ALSO mark the file `serial` so within-project ordering is
+//      deterministic (CI runs `workers: 1` per AGENTS.md "Playwright
+//      E2E specifics"; keeping the file in serial mode mirrors that
+//      behaviour locally and protects against future regressions
+//      where two tests within this file accidentally race on a
+//      shared resource we hadn't anticipated).
+test.describe.configure({ mode: 'serial' });
 
 const SHORT_TOKEN = 'short';
 const MISMATCH_TOKEN = '0000000000000000aaaa'; // 20 chars; the SELECT will not find a matching admin row.
@@ -296,5 +320,147 @@ test.describe('flow: lostpassword toast (#1403 ShowBox → Toast::emit)', () => 
             body.includes('class="sbpp-pending-toast"'),
             'lostpassword response should carry the pending-toast JSON blob',
         ).toBe(true);
+    });
+});
+
+/**
+ * #1456 — form-POST flow privacy fix.
+ *
+ * The pre-fix shape surfaced an "Error: The email address you supplied
+ * is not registered on the system" toast when the user submitted an
+ * email that didn't match any admin row. That gave an unauthenticated
+ * visitor a trivial one-request-per-address oracle: type any email,
+ * read the toast title (Error vs Check E-Mail), conclude whether the
+ * address is registered on the panel.
+ *
+ * The post-fix shape returns the SAME generic "Check E-Mail" toast
+ * regardless of whether the email matched. These specs drive the
+ * `<form id="lostpw-form">` in `page_lostpassword.tpl` end-to-end
+ * (the `sb.api.call(Actions.AuthLostPassword)` round-trip + the
+ * chrome's `window.SBPP.showToast` paint) so a regression that
+ * accidentally re-introduces a branch-specific message — even one
+ * driven from a client-side `if (res.error.code === 'not_registered')`
+ * — fails the gate.
+ *
+ * The PHPUnit integration tests (`web/tests/api/AuthTest.php`) pin
+ * the wire-shape contract on the server side. These E2E tests pin
+ * the user-visible chrome behavior on the client side. Both halves
+ * are necessary: a future template tweak could re-introduce a
+ * branch-specific toast without changing the wire shape, and a
+ * future handler refactor could leak the wire shape without
+ * changing the chrome — only the pair of tests catches both axes.
+ */
+test.describe('flow: lostpassword form POST (#1456 user-enumeration leak)', () => {
+    // Logged-out-only block — page.lostpassword.php redirects
+    // authenticated visitors to /index.php before the form renders.
+    test.use({ storageState: { cookies: [], origins: [] } });
+
+    // Use a dedicated admin row for the "known email" arm so we
+    // don't UPDATE `admin@example.test`'s validate column out from
+    // under the marquee #1403 happy-path test. Cross-project (chromium
+    // ⇄ mobile-chromium) Playwright runs are intrinsically parallel.
+    // See the top-of-file comment + `seedLostpasswordEnumAdminE2e`
+    // docblock for the full rationale. Idempotent shim — re-runs are
+    // free, so the `beforeAll` cost is one INSERT IGNORE per project.
+    let knownEmail: string;
+    test.beforeAll(async () => {
+        const seed = await seedLostpasswordEnumAdminE2e();
+        knownEmail = seed.email;
+    });
+
+    test('Form submission with an unknown email shows the generic "Check E-Mail" toast (NOT an error)', async ({ page }) => {
+        const consoleErrors: string[] = [];
+        page.on('pageerror', (err) => consoleErrors.push(err.message));
+
+        await page.goto('/index.php?p=lostpassword');
+
+        // The form is the static card the View renders — no GET
+        // parameters means the GET-validation branch is skipped and
+        // the page draws the form. Wait for the lucide mail icon
+        // chrome to settle before driving the submit so the busy-
+        // state assertions downstream don't race with the icon
+        // paint.
+        await expect(page.getByTestId('lostpw-email')).toBeVisible();
+
+        await page.getByTestId('lostpw-email').fill('definitely-not-an-admin@example.test');
+        await page.getByTestId('lostpw-submit').click();
+
+        // The post-fix toast is the SAME envelope as the matched-
+        // email branch: kind=info (mapped from the API's 'blue'),
+        // title='Check E-Mail'. Anchor on the data-kind hook so
+        // a sibling chrome surface (e.g. a CSRF error toast that
+        // somehow snuck through) doesn't false-match.
+        const toast = page
+            .locator('.toast[data-kind="info"]')
+            .filter({ hasText: 'Check E-Mail' });
+        await expect(toast).toBeVisible();
+
+        // Body wording IS asserted client-side here because the
+        // body-copy contract is the whole point: a "we sent you
+        // an email" wording would leak that the address exists,
+        // an "address not registered" wording would leak that it
+        // doesn't, and ONLY the conditional "if an account is
+        // registered" wording is neutral. Spec the wording
+        // explicitly so a future copy edit can't silently undo
+        // the fix.
+        await expect(toast).toContainText(/if an account is registered/i);
+
+        // Crucially: NO error toast paints. If the regression
+        // re-surfaces, the chrome would paint a kind=error toast
+        // with "not registered" / "Error" in it. Assert the
+        // absence loudly so a flaky-positive isn't possible.
+        const errorToast = page.locator('.toast[data-kind="error"]');
+        await expect(errorToast).toHaveCount(0);
+
+        expect(
+            consoleErrors,
+            `unexpected console errors:\n${consoleErrors.join('\n')}`,
+        ).toEqual([]);
+    });
+
+    test('Form submission with a known email shows the SAME generic "Check E-Mail" toast (no oracle)', async ({ page }) => {
+        const consoleErrors: string[] = [];
+        page.on('pageerror', (err) => consoleErrors.push(err.message));
+
+        await page.goto('/index.php?p=lostpassword');
+        await expect(page.getByTestId('lostpw-email')).toBeVisible();
+
+        // Use the dedicated `lostpw-enum-known@example.test` row
+        // seeded in `beforeAll` rather than `admin@example.test` so
+        // we don't race the marquee #1403 happy-path test's
+        // `validate`-token seed (the handler UPDATEs `validate` on
+        // every match — see the top-of-file comment).
+        await page.getByTestId('lostpw-email').fill(knownEmail);
+        await page.getByTestId('lostpw-submit').click();
+
+        // The toast HAS to look identical to the unknown-email
+        // case above. We assert the same selector and the same
+        // body wording — if the chrome started branching on
+        // success-vs-failure ("Your reset email has been sent"
+        // vs the neutral wording), the wording check would fail
+        // here even though the kind matches.
+        const toast = page
+            .locator('.toast[data-kind="info"]')
+            .filter({ hasText: 'Check E-Mail' });
+        await expect(toast).toBeVisible();
+        await expect(toast).toContainText(/if an account is registered/i);
+
+        // Same loud absence assertion: no error toast paints.
+        // Pre-fix this branch was the only one that COULD have
+        // produced an error toast — the `mail_failed` envelope
+        // surfaced via the handler's send-failure path. Without
+        // a configured SMTP the e2e seed has nothing routable,
+        // so pre-fix this test would have caught the
+        // `mail_failed` -> Error toast leak. Post-fix it's a
+        // dual gate: catches re-introduction of either
+        // `not_registered` OR `mail_failed` user-visible
+        // branching.
+        const errorToast = page.locator('.toast[data-kind="error"]');
+        await expect(errorToast).toHaveCount(0);
+
+        expect(
+            consoleErrors,
+            `unexpected console errors:\n${consoleErrors.join('\n')}`,
+        ).toEqual([]);
     });
 });

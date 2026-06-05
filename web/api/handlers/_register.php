@@ -1,18 +1,10 @@
 <?php
-/*************************************************************************
-This file is part of SourceBans++
-
-SourceBans++ (c) 2014-2024 by SourceBans++ Dev Team
-
-The SourceBans++ Web panel is licensed under a
-Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
-
-You should have received a copy of the license along with this
-work.  If not, see <http://creativecommons.org/licenses/by-nc-sa/3.0/>.
-
-Centralised handler registry. Every action ends up here so the
-action -> permission table is reviewable in one place.
-*************************************************************************/
+// SourceBans++ (c) 2014-2026 SourceBans++ Dev Team
+// Licensed under the Elastic License 2.0.
+// See LICENSE.txt for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
+//
+// Centralised handler registry. Every action ends up here so the
+// action -> permission table is reviewable in one place.
 
 require_once __DIR__ . '/account.php';
 require_once __DIR__ . '/admins.php';
@@ -77,6 +69,7 @@ Api::register('bans.paste',               'api_bans_paste',                ADMIN
 Api::register('bans.add_comment',         'api_bans_add_comment',          0, true);
 Api::register('bans.edit_comment',        'api_bans_edit_comment',         0, true);
 Api::register('bans.remove_comment',      'api_bans_remove_comment',       ADMIN_OWNER);
+Api::register('bans.remove_demo',         'api_bans_remove_demo',          0, true);
 Api::register('bans.group_ban',           'api_bans_group_ban',            ADMIN_OWNER | ADMIN_ADD_BAN);
 Api::register('bans.ban_member_of_group', 'api_bans_ban_member_of_group',  ADMIN_OWNER | ADMIN_ADD_BAN);
 Api::register('bans.ban_friends',         'api_bans_ban_friends',          ADMIN_OWNER | ADMIN_ADD_BAN);
@@ -171,3 +164,7 @@ Api::register('system.clear_cache',           'api_system_clear_cache',         
 // settings page so we don't accidentally expose the renderer to
 // non-settings surfaces.
 Api::register('system.preview_intro_text',    'api_system_preview_intro_text',    ADMIN_OWNER | ADMIN_WEB_SETTINGS);
+// #1455: SMTP test-email button on the settings page. Same permission
+// gate as the other settings-only actions — only operators who can
+// edit SMTP credentials have a reason to trigger a verification send.
+Api::register('system.test_email',            'api_system_test_email',            ADMIN_OWNER | ADMIN_WEB_SETTINGS);

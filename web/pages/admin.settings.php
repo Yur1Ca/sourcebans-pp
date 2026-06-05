@@ -1,7 +1,7 @@
 <?php
 // SourceBans++ (c) 2014-2026 SourceBans++ Dev Team
-// Licensed under Creative Commons Attribution-NonCommercial-ShareAlike 3.0.
-// See LICENSE.md for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
+// Licensed under the Elastic License 2.0.
+// See LICENSE.txt for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
 
 if (!defined("IN_SB")) {
     echo "You should not be here. Only follow links!";
@@ -12,6 +12,7 @@ global $userbank, $theme;
 use Sbpp\View\AdminFeaturesView;
 use Sbpp\View\AdminLogsView;
 use Sbpp\View\AdminSettingsView;
+use Sbpp\Theme\ThemeConf;
 use Sbpp\View\AdminThemesView;
 use Sbpp\View\Perms;
 use Sbpp\View\Renderer;
@@ -258,8 +259,8 @@ if ($canSettings && isset($_POST['settingsGroup'])) {
  * constant twice in one process, so the regex is the only way to
  * enumerate without resetting state). B18 keeps the regex-based
  * discovery and just enriches it with author / version / link /
- * screenshot — every theme.conf.php is expected to declare those four
- * constants.
+ * screenshot — every theme.conf.php is expected to declare those five
+ * define() keys (single- or double-quoted string literals; see #1466).
  */
 $validThemes = [];
 $themesDir   = opendir(SB_THEMES);
@@ -275,31 +276,20 @@ if ($themesDir !== false) {
         $confSrc = (string) @file_get_contents($confPath);
         $validThemes[] = [
             'dir'        => $filename,
-            'name'       => themeConfMatch($confSrc, 'theme_name', $filename),
-            'author'     => themeConfMatch($confSrc, 'theme_author', 'Unknown'),
-            'version'    => themeConfMatch($confSrc, 'theme_version', '?'),
-            'link'       => themeConfMatch($confSrc, 'theme_link', ''),
-            'screenshot' => 'themes/' . $filename . '/' . themeConfMatch($confSrc, 'theme_screenshot', 'screenshot.jpg'),
+            'name'       => ThemeConf::parseDefine($confSrc, 'theme_name', $filename),
+            'author'     => ThemeConf::parseDefine($confSrc, 'theme_author', 'Unknown'),
+            'version'    => ThemeConf::parseDefine($confSrc, 'theme_version', '?'),
+            'link'       => ThemeConf::sanitizeLink(ThemeConf::parseDefine($confSrc, 'theme_link', '')),
+            'screenshot' => 'themes/' . $filename . '/' . ThemeConf::sanitizeScreenshotFilename(
+                ThemeConf::parseDefine($confSrc, 'theme_screenshot', 'screenshot.jpg'),
+                'screenshot.jpg',
+            ),
             'active'     => $filename === SB_THEME,
         ];
     }
     closedir($themesDir);
 }
 usort($validThemes, fn(array $a, array $b): int => strcasecmp($a['name'], $b['name']));
-
-/**
- * Pluck a `define('<key>', "<value>")` literal out of a theme.conf.php
- * source string. Mirrors the legacy regex shape (double-quoted only)
- * so existing theme manifests keep parsing identically.
- */
-function themeConfMatch(string $src, string $key, string $default): string
-{
-    $pattern = '/define\(\s*\'' . preg_quote($key, '/') . '\'\s*,\s*"([^"]*)"\s*\)\s*;/';
-    if (preg_match($pattern, $src, $m) === 1) {
-        return strip_tags($m[1]);
-    }
-    return $default;
-}
 
 /**
  * Whether STEAMAPIKEY is set to a non-empty value at runtime. Wrapped
@@ -469,11 +459,30 @@ if ($section === 'themes') {
     $authMaxlifeRemember = (int) Config::get('auth.maxlife.remember');
     $authMaxlifeSteam    = (int) Config::get('auth.maxlife.steam');
 
+    /*
+     * #1480 review finding 5: surface a visible warning to the
+     * operator when `template.logo` is non-empty but the chrome is
+     * currently rendering the fallback shield (the configured file
+     * doesn't exist on disk, points at the v1.x default, etc.). The
+     * resolver silently falls back to {@see \Sbpp\View\BrandLogo::DEFAULT_PATH}
+     * to prevent the broken `<img>` regression; without this
+     * indicator the operator has no signal that their customisation
+     * is inactive (the input still shows the raw configured value).
+     * Deliberately not flagged on the empty / unset case — an empty
+     * input self-evidently isn't a customisation in flight.
+     */
+    $rawLogo = (string) Config::get('template.logo');
+    $resolvedLogo = \Sbpp\View\BrandLogo::resolve();
+    $logoUsingFallback = trim($rawLogo) !== ''
+        && trim($rawLogo) !== \Sbpp\View\BrandLogo::DEFAULT_PATH
+        && $resolvedLogo === \Sbpp\View\BrandLogo::DEFAULT_PATH;
+
     Renderer::render($theme, new AdminSettingsView(
         can_web_settings:            $perms['can_web_settings'],
         can_owner:                   $perms['can_owner'],
         config_title:                (string) Config::get('template.title'),
-        config_logo:                 (string) Config::get('template.logo'),
+        config_logo:                 $rawLogo,
+        config_logo_using_fallback:  $logoUsingFallback,
         config_min_password:         (int) MIN_PASS_LENGTH,
         config_dateformat:           (string) Config::get('config.dateformat'),
         config_dash_title:           (string) Config::get('dash.intro.title'),
@@ -503,6 +512,11 @@ if ($section === 'themes') {
         config_smtp_verify_peer:     Config::getBool('smtp.verify_peer'),
         config_mail_from_email:      (string) Config::get('config.mail.from_email'),
         config_mail_from_name:       (string) Config::get('config.mail.from_name'),
+        // #1455: SMTP test-email button default recipient — current
+        // admin's email if any. The page-tail JS keeps the input
+        // editable so an operator can send the test to a different
+        // mailbox (e.g. a shared on-call address).
+        admin_email:                 (string) ($userbank->GetProperty('email') ?? ''),
     ));
 }
 

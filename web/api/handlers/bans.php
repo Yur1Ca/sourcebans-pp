@@ -1,15 +1,7 @@
 <?php
-/*************************************************************************
-This file is part of SourceBans++
-
-SourceBans++ (c) 2014-2024 by SourceBans++ Dev Team
-
-The SourceBans++ Web panel is licensed under a
-Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
-
-You should have received a copy of the license along with this
-work.  If not, see <http://creativecommons.org/licenses/by-nc-sa/3.0/>.
-*************************************************************************/
+// SourceBans++ (c) 2014-2026 SourceBans++ Dev Team
+// Licensed under the Elastic License 2.0.
+// See LICENSE.txt for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
 
 use Sbpp\Mail\EmailType;
 use Sbpp\Mail\Mail;
@@ -79,19 +71,29 @@ function api_bans_add(array $params): array
         if (!preg_match(SteamID::HANDLER_STRICT_REGEX, $rawSteam)) {
             throw new ApiError('validation', 'Please enter a valid Steam ID or Community ID', 'steam');
         }
+    } elseif ($rawSteam !== '') {
+        // #1486: IP-type ban where the operator ALSO filled the Steam ID
+        // field. Keep it as a record-of-fact alongside the IP instead of
+        // silently dropping the input. Enforcement stays IP-only — the
+        // SourceMod plugin matches an IP ban purely on the `ip` column
+        // (sbpp_main.sp: `(type=0 AND authid…) OR (type=1 AND ip…)`), so
+        // this authid is inert plugin-side; it exists only so the ban
+        // detail / banlist can show which account the IP belonged to.
+        //
+        // The shape gate is still load-bearing: an unvalidated
+        // `toSteam2('garbage')` throws `Invalid SteamID input!` and the
+        // dispatcher's `Throwable` fallback turns it into a 500 envelope
+        // (the #1420 / #1423 follow-up #4 bug class). Validate before
+        // convert so the recorded id can't be corrupt and the add can't
+        // 500. An empty Steam ID field on an IP ban is fine (no record).
+        if (!preg_match(SteamID::HANDLER_STRICT_REGEX, $rawSteam)) {
+            throw new ApiError('validation', 'Please enter a valid Steam ID or Community ID', 'steam');
+        }
     }
-    // For IP-typed bans the `:authid` column is the *steam id*, of which
-    // there is none — write empty string regardless of whatever the
-    // caller passed in `$rawSteam`. Pre-#1423 follow-up #4 the handler
-    // converted any non-empty `$rawSteam` here without re-running the
-    // shape gate (which was Steam-branch-only), so a hostile / typo'd
-    // caller passing `type=1&steam=garbage&ip=1.2.3.4` triggered
-    // `toSteam2('garbage')` → `Exception('Invalid SteamID input!')` →
-    // `Api::handle` `Throwable` fallback → 500 envelope (the bug class
-    // #1420 was supposed to close, surfacing on the IP-type branch the
-    // original review didn't cover). The page-handler sibling
-    // (`admin.edit.ban.php`) carries the matching write-side fix.
-    $steam = $banType === BanType::Ip ? '' : ($rawSteam === '' ? '' : SteamID::toSteam2($rawSteam));
+    // Steam bans require a SteamID; IP bans keep it only when one was
+    // typed (empty otherwise). The shape gate above guarantees this
+    // conversion cannot throw on either branch.
+    $steam = $rawSteam === '' ? '' : SteamID::toSteam2($rawSteam);
     if (empty($ip) && $banType === BanType::Ip) {
         throw new ApiError('validation', 'You must type an IP', 'ip');
     }
@@ -354,6 +356,67 @@ function api_bans_edit_comment(array $params): array
             'kind'  => 'green',
             'redir' => 'index.php' . $redir,
         ],
+    ];
+}
+
+function api_bans_remove_demo(array $params): array
+{
+    global $userbank, $username;
+
+    $bid = (int) ($params['bid'] ?? 0);
+    if ($bid <= 0) {
+        throw new ApiError('validation', 'Missing or invalid ban id.', 'bid');
+    }
+
+    $row = $GLOBALS['PDO']
+        ->query(
+            'SELECT ba.aid, ad.gid
+             FROM `:prefix_bans` AS ba
+             LEFT JOIN `:prefix_admins` AS ad ON ba.aid = ad.aid
+             WHERE ba.bid = :bid'
+        )
+        ->single([':bid' => $bid]);
+
+    if (!$row) {
+        throw new ApiError('not_found', 'Ban not found.');
+    }
+
+    $canEdit = $userbank->HasAccess(WebPermission::mask(WebPermission::Owner, WebPermission::EditAllBans))
+        || ($userbank->HasAccess(WebPermission::EditOwnBans) && (int) $row['aid'] === $userbank->GetAid())
+        || ($userbank->HasAccess(WebPermission::EditGroupBans) && (int) $row['gid'] === (int) $userbank->GetProperty('gid'));
+
+    if (!$canEdit) {
+        throw new ApiError('forbidden', 'You do not have permission to edit this ban.');
+    }
+
+    $demo = $GLOBALS['PDO']
+        ->query(
+            "SELECT filename FROM `:prefix_demos`
+             WHERE demid = :bid AND UPPER(demtype) = 'B'"
+        )
+        ->single([':bid' => $bid]);
+
+    if (!$demo) {
+        throw new ApiError('not_found', 'No demo is attached to this ban.');
+    }
+
+    $onDisk = basename((string) $demo['filename']);
+    $path   = SB_DEMOS . '/' . $onDisk;
+    $listing = is_dir(SB_DEMOS) ? scandir(SB_DEMOS) : false;
+    if ($onDisk !== '' && $listing !== false && in_array($onDisk, $listing, true) && is_file($path)) {
+        if (!unlink($path)) {
+            throw new ApiError('server_error', 'Unable to delete demo file from disk.');
+        }
+    }
+
+    $GLOBALS['PDO']
+        ->query("DELETE FROM `:prefix_demos` WHERE demid = :bid AND UPPER(demtype) = 'B'")
+        ->execute([':bid' => $bid]);
+
+    Log::add(LogType::Message, 'Demo Removed', "$username removed the demo from ban #$bid");
+
+    return [
+        'removed' => true,
     ];
 }
 
@@ -838,10 +901,21 @@ function api_bans_detail(array $params): array
         $state = 'active';
     }
 
+    // An IP-type ban carries a SteamID only when the operator typed one
+    // (#1486 made it a record-of-fact); otherwise authid is empty. Some
+    // legacy rows also hold malformed authids (#900). Gate steam2 on the
+    // shape check so toSteam3() / the community id below never derive a
+    // synthetic value from an empty or junk authid.
     $steam2 = $authid !== '' && SteamID::isValidID($authid) ? $authid : '';
-    // Some legacy rows hold malformed authids (#900); fall back to a
-    // canonical placeholder so toSteam3() doesn't blow up the response.
     $steam3 = $steam2 !== '' ? (string)SteamID::toSteam3($steam2) : '';
+    // #1486: community_id is computed in SQL straight off BA.authid, so an
+    // empty authid (IP-type ban with no recorded SteamID) or a malformed
+    // one collapses the arithmetic to the base 76561197960265728
+    // (STEAM_0:0:0) — the bogus "Community" id the drawer used to paint.
+    // Gate it on the same validity check as steam2/3 so it surfaces ONLY
+    // when there's a real SteamID behind it (Steam bans, or IP bans where
+    // the operator recorded one).
+    $communityId = $steam2 !== '' ? (string)$row['community_id'] : '';
 
     $removedByName = null;
     if ($row['RemovedBy'] !== null && (int)$row['RemovedBy'] > 0 && !$hideAdmin) {
@@ -889,7 +963,7 @@ function api_bans_detail(array $params): array
             'type'         => $type,
             'steam_id'     => $steam2,
             'steam_id_3'   => $steam3,
-            'community_id' => (string)$row['community_id'],
+            'community_id' => $communityId,
             'ip'           => $hideIps || $banIp === '' ? null : $banIp,
             'country'      => !empty($row['country']) && trim((string)$row['country']) !== '' ? (string)$row['country'] : null,
         ],

@@ -26,6 +26,38 @@ final class BansTest extends ApiTestCase
         return (int)$pdo->lastInsertId();
     }
 
+    private function seedDemoForBan(int $bid, string $filename = 'testdemo1464.dem'): void
+    {
+        $path = SB_DEMOS . '/' . $filename;
+        if (!is_dir(SB_DEMOS)) {
+            mkdir(SB_DEMOS, 0775, true);
+        }
+        file_put_contents($path, 'demo-bytes');
+        $pdo = Fixture::rawPdo();
+        $pdo->prepare(sprintf(
+            'INSERT INTO `%s_demos` (demid, demtype, filename, origname) VALUES (?, ?, ?, ?)',
+            DB_PREFIX
+        ))->execute([$bid, 'B', $filename, 'evidence.dem']);
+    }
+
+    private function createAdminWithFlags(int $mask): int
+    {
+        $pdo = Fixture::rawPdo();
+        $stmt = $pdo->prepare(sprintf(
+            'INSERT INTO `%s_admins` (user, authid, password, gid, email, validate, extraflags, immunity)
+             VALUES (?, ?, ?, -1, ?, NULL, ?, 50)',
+            DB_PREFIX,
+        ));
+        $stmt->execute([
+            'flagged-' . $mask,
+            'STEAM_0:0:' . (4_000_000 + $mask),
+            password_hash('x', PASSWORD_BCRYPT),
+            'flagged-' . $mask . '@example.test',
+            $mask,
+        ]);
+        return (int) $pdo->lastInsertId();
+    }
+
     private function seedSubmission(string $name = 'Bob', string $steam = 'STEAM_0:1:99'): int
     {
         $pdo = Fixture::rawPdo();
@@ -166,69 +198,93 @@ final class BansTest extends ApiTestCase
     }
 
     /**
-     * #1423 follow-up #4 — pre-fix the IP-type ban path had two bugs:
+     * #1486 — IP-type bans keep a Steam ID-of-record when the operator
+     * fills both fields, instead of silently dropping it. The schema has
+     * always had room (separate `ip` + `authid` columns); the previous
+     * code hard-cleared `authid` for `type=1`. Enforcement stays IP-only
+     * (the SourceMod plugin matches an IP ban on the `ip` column alone),
+     * so the recorded authid is inert plugin-side; it exists so the ban
+     * detail / banlist can show which account the IP belonged to.
      *
-     *   1. Stored whatever the caller passed in `$rawSteam` into
-     *      `:prefix_bans.authid` if it happened to be a valid shape
-     *      (the `$rawSteam === '' ? '' : SteamID::toSteam2($rawSteam)`
-     *      ternary ignored `$banType`). On an IP-type ban the
-     *      `:authid` column is the *steam id*, of which there is
-     *      none — the schema's `NOT NULL default ''` is the
-     *      canonical "no steam id" value.
-     *   2. Raised a generic 500 (`SteamID::toSteam2('garbage')` →
-     *      `Exception('Invalid SteamID input!')` → `Api::handle`
-     *      `Throwable` fallback) when the caller's `$rawSteam` was
-     *      non-empty AND failed the library shape gate. The
-     *      Steam-branch `preg_match` doesn't run on IP-type bans
-     *      (its `if ($banType === BanType::Steam)` short-circuits),
-     *      so a hostile caller posting `type=1&steam=garbage`
-     *      reliably 500'd the panel.
-     *
-     * The fix hard-codes `$steam = ''` for `$banType === BanType::Ip`
-     * — whatever the caller passed in `$rawSteam` is irrelevant on
-     * an IP-type ban; the column is empty by definition.
+     * The shape gate from #1423 follow-up #4 is preserved: a non-empty
+     * Steam ID on an IP ban is validated BEFORE `toSteam2()` so a garbage
+     * value can't escape as `Exception('Invalid SteamID input!')` → 500
+     * envelope. Garbage now returns a structured `validation` error on
+     * the `steam` field instead of either 500ing (the original bug) or
+     * being silently swallowed (the pre-#1486 drop). An empty Steam ID
+     * field on an IP ban records nothing.
      */
-    public function testAddIpTypeAlwaysWritesEmptyAuthid(): void
+    public function testAddIpTypeKeepsValidatedSteamOfRecord(): void
     {
         $this->loginAsAdmin();
         // 1) Valid Steam-shape `steam` with `type=1` (IP-type ban).
-        //    Pre-fix this would have canonicalised + stored
-        //    `STEAM_0:1:9999` in `:authid`; the fix writes empty.
+        //    The canonical SteamID is stored alongside the IP.
         $env = $this->api('bans.add', [
             'nickname' => 'IpType_validSteam', 'type' => 1,
             'steam' => 'STEAM_0:1:9999', 'ip' => '203.0.113.42',
             'length' => 0, 'reason' => 'ip ban with steam input',
             'fromsub' => 0,
         ]);
-        $this->assertTrue($env['ok'], 'IP-type ban should succeed regardless of steam input');
+        $this->assertTrue($env['ok'], 'IP-type ban with a valid steam should succeed');
         $row = $this->row('bans', ['ip' => '203.0.113.42']);
-        $this->assertSame('', (string) $row['authid'], 'IP-type ban must write empty authid');
+        $this->assertSame('STEAM_0:1:9999', (string) $row['authid'], 'IP-type ban keeps the recorded steam');
         $this->assertSame('1', (string) $row['type']);
 
-        // 2) Garbage `steam` with `type=1`. Pre-fix this raised
-        //    `Exception('Invalid SteamID input!')` → 500 envelope.
-        //    Post-fix the IP-type branch never reaches the converter.
+        // 2) No `steam` typed with `type=1`: nothing recorded, empty authid.
+        $env = $this->api('bans.add', [
+            'nickname' => 'IpType_noSteam', 'type' => 1,
+            'steam' => '', 'ip' => '203.0.113.45',
+            'length' => 0, 'reason' => 'ip ban without steam input',
+            'fromsub' => 0,
+        ]);
+        $this->assertTrue($env['ok'], 'IP-type ban with no steam should succeed');
+        $row = $this->row('bans', ['ip' => '203.0.113.45']);
+        $this->assertSame('', (string) $row['authid'], 'IP-type ban without steam writes empty authid');
+
+        // 3) Garbage `steam` with `type=1`. Pre-#1423-follow-up-#4 this
+        //    raised `Exception('Invalid SteamID input!')` → 500 envelope.
+        //    The shape gate now rejects it with a structured validation
+        //    error (NOT a 500, NOT a silent drop).
         $env = $this->api('bans.add', [
             'nickname' => 'IpType_garbageSteam', 'type' => 1,
             'steam' => 'garbage', 'ip' => '203.0.113.43',
             'length' => 0, 'reason' => 'ip ban with garbage steam input',
             'fromsub' => 0,
         ]);
-        $this->assertTrue($env['ok'], 'IP-type ban must NOT 500 on garbage steam input');
-        $row = $this->row('bans', ['ip' => '203.0.113.43']);
-        $this->assertSame('', (string) $row['authid']);
+        $this->assertEnvelopeError($env, 'validation');
+        $this->assertSame('steam', $env['error']['field']);
+        $this->assertNull($this->row('bans', ['ip' => '203.0.113.43']), 'garbage steam must NOT create an IP ban row');
 
-        // 3) Newline-bypass `steam` with `type=1`. Same shape, different
-        //    expected outcome: the IP-type branch ignores it entirely.
+        // 4) Non-trimmable malformed `steam` with `type=1`. The handler
+        //    trims `$rawSteam` first, so a trailing newline (`STEAM_0:0:1\n`)
+        //    is stripped to the valid `STEAM_0:0:1` (see case 5) — the gate
+        //    only has to catch shapes `trim()` can't fix. A MID-string
+        //    newline is the canonical such case, mirroring the Steam-branch
+        //    lockstep in testAddRejectsInvalidSteamIdShapeForType0.
         $env = $this->api('bans.add', [
-            'nickname' => 'IpType_newlineSteam', 'type' => 1,
-            'steam' => "STEAM_0:0:1\n", 'ip' => '203.0.113.44',
-            'length' => 0, 'reason' => 'ip ban with newline steam input',
+            'nickname' => 'IpType_malformedSteam', 'type' => 1,
+            'steam' => "STEAM_0:0:1\nGARBAGE", 'ip' => '203.0.113.44',
+            'length' => 0, 'reason' => 'ip ban with malformed steam input',
             'fromsub' => 0,
         ]);
-        $this->assertTrue($env['ok']);
-        $row = $this->row('bans', ['ip' => '203.0.113.44']);
-        $this->assertSame('', (string) $row['authid']);
+        $this->assertEnvelopeError($env, 'validation');
+        $this->assertSame('steam', $env['error']['field']);
+        $this->assertNull($this->row('bans', ['ip' => '203.0.113.44']), 'malformed steam must NOT create an IP ban row');
+
+        // 5) Trailing-newline `steam` with `type=1`: `trim()` strips it to
+        //    the valid `STEAM_0:0:1`, which is then kept as the record (the
+        //    handler is symmetric with the Steam branch here — the regex's
+        //    own newline-bypass rejection is pinned at the library level by
+        //    SteamIDValidationTest::testHandlerStrictRegexRejectsNewlineBypass).
+        $env = $this->api('bans.add', [
+            'nickname' => 'IpType_trailingNewline', 'type' => 1,
+            'steam' => "STEAM_0:0:1\n", 'ip' => '203.0.113.46',
+            'length' => 0, 'reason' => 'ip ban with trailing-newline steam',
+            'fromsub' => 0,
+        ]);
+        $this->assertTrue($env['ok'], 'trailing-newline trims to a valid steam and is kept');
+        $row = $this->row('bans', ['ip' => '203.0.113.46']);
+        $this->assertSame('STEAM_0:0:1', (string) $row['authid'], 'trimmed steam is stored on the IP ban');
     }
 
     public function testAddValidationNegativeLength(): void
@@ -491,6 +547,39 @@ final class BansTest extends ApiTestCase
             'pre-2.0 admin-lifted row (RemoveType IS NULL but RemovedBy > 0) '
             . 'must surface as state=unbanned via the defensive fallback in '
             . 'api_bans_detail (parity with the page handler\'s SQL filter)');
+    }
+
+    public function testDetailIpTypeBanReportsNoSteamOrCommunityId(): void
+    {
+        // #1486: an IP-type ban with NO recorded SteamID stores an empty
+        // authid (the operator only filled the IP field). community_id is
+        // computed in SQL straight off authid, so an empty authid collapsed
+        // the arithmetic to the base 76561197960265728 (STEAM_0:0:0) and the
+        // drawer rendered a bogus "Community" id. steam_id / steam_id_3 were
+        // already gated on SteamID::isValidID(); community_id must match.
+        // (The "filled both fields" case now keeps the SteamID — see
+        // testAddIpTypeKeepsValidatedSteamOfRecord; this test pins the
+        // IP-only shape where the guard is load-bearing.) The IP is the
+        // row's real identity, so it must still surface. Assert as admin so
+        // banlist.hideplayerips can't mask the IP regardless of seed defaults.
+        $this->loginAsAdmin();
+        $pdo = Fixture::rawPdo();
+        $pdo->prepare(sprintf(
+            'INSERT INTO `%s_bans` (created, type, ip, authid, name, ends, length, reason, aid, adminIp)
+             VALUES (UNIX_TIMESTAMP(), 1, ?, "", ?, UNIX_TIMESTAMP(), 0, ?, ?, "127.0.0.1")',
+            DB_PREFIX
+        ))->execute(['203.0.113.77', 'IpOnly', 'ip-type ban', Fixture::adminAid()]);
+        $bid = (int) $pdo->lastInsertId();
+
+        $env = $this->api('bans.detail', ['bid' => $bid]);
+        $this->assertTrue($env['ok'], json_encode($env));
+        $this->assertSame(1, $env['data']['player']['type'], 'seeded ban is IP-type');
+        $this->assertSame('', $env['data']['player']['steam_id']);
+        $this->assertSame('', $env['data']['player']['steam_id_3']);
+        $this->assertSame('', $env['data']['player']['community_id'],
+            'IP-type ban (empty authid) must not surface a synthetic community id (#1486)');
+        $this->assertSame('203.0.113.77', $env['data']['player']['ip'],
+            'IP-type ban must still surface the IP as the row identity (#1486)');
     }
 
     public function testAddCommentInsertsRow(): void
@@ -951,5 +1040,53 @@ final class BansTest extends ApiTestCase
         $this->assertTrue($env['ok'], json_encode($env));
         $this->assertSame(0, (int)$env['data']['total']);
         $this->assertSame([], $env['data']['items']);
+    }
+
+    public function testRemoveDemoRejectsAnonymous(): void
+    {
+        $bid = $this->seedBan();
+        $env = $this->api('bans.remove_demo', ['bid' => $bid]);
+        $this->assertEnvelopeError($env, 'forbidden');
+    }
+
+    public function testRemoveDemoNotFoundWhenNoDemoAttached(): void
+    {
+        $this->loginAsAdmin();
+        $bid = $this->seedBan();
+        $env = $this->api('bans.remove_demo', ['bid' => $bid]);
+        $this->assertEnvelopeError($env, 'not_found');
+    }
+
+    public function testRemoveDemoForbiddenWhenAdminCannotEditBan(): void
+    {
+        $bid = $this->seedBan();
+        $this->seedDemoForBan($bid, 'forbidden1464.dem');
+        $aid = $this->createAdminWithFlags(ADMIN_ADD_BAN);
+        $this->loginAs($aid);
+
+        $env = $this->api('bans.remove_demo', ['bid' => $bid]);
+        $this->assertEnvelopeError($env, 'forbidden');
+    }
+
+    public function testRemoveDemoSuccess(): void
+    {
+        $this->loginAsAdmin();
+        $bid = $this->seedBan();
+        $filename = 'testdemo1464.dem';
+        $this->seedDemoForBan($bid, $filename);
+        $path = SB_DEMOS . '/' . $filename;
+
+        $env = $this->api('bans.remove_demo', ['bid' => $bid]);
+        $this->assertTrue($env['ok'], json_encode($env));
+        $this->assertTrue($env['data']['removed']);
+
+        $pdo = Fixture::rawPdo();
+        $row = $pdo->prepare(sprintf(
+            'SELECT COUNT(*) FROM `%s_demos` WHERE demid = ? AND UPPER(demtype) = ?',
+            DB_PREFIX
+        ));
+        $row->execute([$bid, 'B']);
+        $this->assertSame(0, (int) $row->fetchColumn());
+        $this->assertFileDoesNotExist($path);
     }
 }

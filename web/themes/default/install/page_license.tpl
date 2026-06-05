@@ -6,18 +6,20 @@
 {include file="install/_chrome.tpl"}
 
 <p class="lead">
-    To use this web panel you have to read and accept the license
-    below. If you don't agree, you can't install the panel.
-    A plain-language explanation of the license lives at
-    <a href="https://creativecommons.org/licenses/by-nc-sa/3.0/"
-       target="_blank" rel="noopener">creativecommons.org</a>.
+    You need to accept the license below to install the panel.
+    The full text is at
+    <a href="https://www.elastic.co/licensing/elastic-license"
+       target="_blank" rel="noopener">elastic.co/licensing/elastic-license</a>;
+    SourceMod plugins shipped with this install are separately licensed under
+    <a href="https://www.gnu.org/licenses/gpl-3.0.html"
+       target="_blank" rel="noopener">GPLv3</a>.
 </p>
 
 <div class="card">
     <div class="card__header">
         <div>
             <h2 style="margin:0;font-size:0.95rem;font-weight:600">
-                Creative Commons &mdash; Attribution-NonCommercial-ShareAlike 3.0
+                Elastic License 2.0 (web panel) &middot; GPLv3 (SourceMod plugins)
             </h2>
         </div>
     </div>

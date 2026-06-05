@@ -13,18 +13,33 @@ topic. If yours isn't here, drop into our
 
 ### What is SourceBans++?
 
-A free, open-source admin and ban-management system for Source-engine
-game servers. It has a web panel your admins log into and a set of
-SourceMod plugins running on each of your game servers. They share a
-database and coordinate through it.
+A source-available admin and ban-management system for Source-engine
+game servers, free for community use. It has a web panel your admins
+log into and a set of SourceMod plugins running on each of your game
+servers. They share a database and coordinate through it.
 
 The [Overview](/getting-started/overview/) has the longer answer.
 
 ### Is it free?
 
-Yes. SourceBans++ is open source under CC BY-NC-SA 3.0 for the web
-panel and GPLv3 for the plugins. We don't sell hosting, support, or
-plugins.
+Yes, for everyone except game-server hosting companies who want to
+offer the panel to their customers as a hosted, managed service.
+
+The web panel is distributed under the
+[Elastic License 2.0](https://www.elastic.co/licensing/elastic-license);
+the SourceMod plugins are under
+[GPLv3](https://www.gnu.org/licenses/gpl-3.0.html). Hobby use,
+community use, running it for your own clan / network, bundling it
+into a Docker image, publishing a Pterodactyl egg, and packaging
+it for a distro all stay free under ELv2's terms. What ELv2
+reserves is the right to provide the panel as a hosted or managed
+service to third parties; if that's your business model, the
+project offers a separate commercial license. For commercial
+licensing inquiries, reach out on the
+[Discord](https://discord.gg/tzqYqmAtF5). See the
+[sponsor page](/sponsor/) for the longer breakdown.
+
+We don't sell hosting, support, or plugins ourselves.
 
 ### Where can I get help?
 
@@ -44,10 +59,10 @@ Take a stab at the issues labelled `good first issue` or `help wanted`
 on the [issue tracker](https://github.com/sbpp/sourcebans-pp/issues).
 The
 [`AGENTS.md`](https://github.com/sbpp/sourcebans-pp/blob/main/AGENTS.md)
-file in the repo root is the contributor cheatsheet — conventions,
+file in the repo root is the contributor cheatsheet: conventions,
 the local Docker dev stack, and the "where to find what" index.
 
-Translation PRs are always welcome too — see
+Translation PRs are always welcome too. See
 [Translating](/customization/translating/).
 
 ## Installing
@@ -56,7 +71,7 @@ Translation PRs are always welcome too — see
 
 Not really. You need the web panel at minimum to install, configure,
 and add servers. In theory you could stop using the panel after that
-and the in-game half would keep enforcing bans — but you'd lose
+and the in-game half would keep enforcing bans, but you'd lose
 access to most of what makes SourceBans++ useful: adding admins,
 managing bans, processing appeals, viewing the audit log.
 
@@ -75,7 +90,7 @@ If SourceMod runs on it, SourceBans++ usually runs on it.
 Yes. The panel and plugin halves only need to share a database; they
 can be on different hosts, different networks, even different
 continents. The DB user's grant has to allow connections from both
-hosts, which is the most common stumbling block — see
+hosts, which is the most common stumbling block. See
 [Database setup → Granting permission](/setup/mariadb/#granting-permission).
 
 ### Will it work on shared hosting?
@@ -84,7 +99,7 @@ Yes, with two caveats:
 
 - The host must run **PHP >= 8.5** with `pdo_mysql`, `openssl`,
   `xml`, and `mbstring`. Most modern shared hosts do. (Older 1.x
-  installs also required `gmp`; not needed since 2.x — native
+  installs also required `gmp`. Not needed since 2.x; native
   64-bit `int` math handles Steam ID conversion.)
 - The host must allow **remote database connections** if your
   game servers aren't on the same host. Many shared hosts
@@ -96,7 +111,7 @@ Yes, with two caveats:
 ### Why am I seeing a blank white page?
 
 PHP hit a fatal error before any output was sent. The actual error
-goes to your webserver's PHP error log — see
+goes to your webserver's PHP error log. See
 [Panel won't load](/troubleshooting/panel-not-loading/#1-server-level-errors-blank-white-page)
 for the typical log paths and how to read them.
 
@@ -109,6 +124,29 @@ Edit the owner account under **Admin Panel → Admins** and assign
 yourself to an admin group with the relevant notification flags
 (typically the group that gets emails for new ban submissions,
 protests, etc.).
+
+### How do I verify SMTP without waiting for a real event?
+
+Go to **Admin Panel → Settings → Main** and scroll to the SMTP card.
+Below the regular SMTP fields you'll see **Send a test email** —
+it's pre-populated with your admin account's email but you can
+swap in any recipient. Click **Send test email** and the panel
+dispatches a one-shot verification message through the saved SMTP
+credentials.
+
+A few things to keep in mind:
+
+- The button is greyed out until **Host**, **Username**, and the
+  **From address** are saved. Save the form first if you just
+  changed any of them — the test reads the persisted values, not
+  the unsaved contents of the inputs.
+- The action is rate-limited to one send every 10 seconds per
+  install (prevents accidental misconfiguration from spamming
+  your SMTP relay).
+- Both success and failure show up in **Admin Panel → System
+  log**, so you can correlate a "Test email failed" toast with
+  the underlying SMTP error (`Mail error`) entry from the same
+  request.
 
 ### I locked myself out by enabling Steam-only login
 
@@ -126,7 +164,7 @@ That re-enables password login alongside Steam OpenID. Sign in,
 then fix the configuration the way you intended.
 
 :::caution
-Editing `_settings` directly is a foot-gun — bad values can break
+Editing `_settings` directly is a foot-gun: bad values can break
 the panel's bootstrap. Touch only the row you intend to fix, and
 back up the table first if you're not sure.
 :::
@@ -154,7 +192,7 @@ files; if `basebans.smx` is still in `plugins/`, move it manually.
 
 The `"sourcebans"` block is missing from SourceMod's
 `databases.cfg`. The [Quickstart](/getting-started/quickstart/#databasescfg)
-shows the canonical block — add it, save, reload the map, and the
+shows the canonical block. Add it, save, reload the map, and the
 plugin will pick it up.
 
 ### Why does the panel only show "Max Players" instead of the actual player list?
@@ -191,7 +229,7 @@ delete the `install/` and `updater/` directories when done.
 
 ### Is upgrading to 2.0.x different?
 
-Yes — read [Upgrading from 1.8.x to 2.0.x](/updating/1-8-to-2-0/)
+Yes. Read [Upgrading from 1.8.x to 2.0.x](/updating/1-8-to-2-0/)
 first. v2.0 raises the PHP version floor, resets the active theme,
 and ships default-on anonymous telemetry. The upgrade itself is
 otherwise normal.

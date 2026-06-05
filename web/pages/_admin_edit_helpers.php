@@ -1,13 +1,12 @@
 <?php
 // SourceBans++ (c) 2014-2026 SourceBans++ Dev Team
-// Licensed under Creative Commons Attribution-NonCommercial-ShareAlike 3.0.
-// See LICENSE.md for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
+// Licensed under the Elastic License 2.0.
+// See LICENSE.txt for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
 
 declare(strict_types=1);
 
 /**
- * Shared helpers for the `admin.edit.*` cluster (issue sbpp/goals#5,
- * Phase 2.5).
+ * Shared helpers for the `admin.edit.*` cluster.
  *
  * Pre-fix every page handler in the cluster carried its own ad-hoc
  * `<script>ShowBox(…)</script>` emitter, its own `errorScript .= "$('id.msg')…"`

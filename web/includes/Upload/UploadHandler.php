@@ -1,7 +1,7 @@
 <?php
 // SourceBans++ (c) 2014-2026 SourceBans++ Dev Team
-// Licensed under Creative Commons Attribution-NonCommercial-ShareAlike 3.0.
-// See LICENSE.md for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
+// Licensed under the Elastic License 2.0.
+// See LICENSE.txt for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
 
 declare(strict_types=1);
 
@@ -15,7 +15,7 @@ use LogType;
 /**
  * Shared file-upload chrome for the three pop-up upload handlers
  * (`admin.uploaddemo.php`, `admin.uploadicon.php`,
- * `admin.uploadmapimg.php` — issue sbpp/goals#5, Phase 2.5i).
+ * `admin.uploadmapimg.php`).
  *
  * The pre-rewrite path duplicated the same six-step flow across the
  * three pages (CSRF check → extension allowlist → `move_uploaded_file`

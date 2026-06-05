@@ -64,6 +64,7 @@ code change — never as a follow-up. CI doesn't gate this; it's on you.
 | Publish or amend a project announcement (the admin-only home-dashboard banner) | `docs/public/announcements.json` (Astro publishes it as a static asset at `https://sbpp.github.io/announcements.json`). One-file source of truth — don't reach for an admin endpoint, an in-panel composer, or a separate git repo. Schema + sort + expiry rules are in `docs/src/content/docs/configuring/announcements.mdx` (operator-facing) and the "Project announcements feed" Conventions block in `AGENTS.md` (agent-facing). The starter file is `[]` (empty array); the deploy chain (`docs-deploy-trigger.yml`) ships the updated file within minutes of merge to `main`. |
 | Add or edit a project sponsor / funding platform / sponsor tier | `docs/src/data/sponsors.json` is the single source of truth. Three top-level keys: `platforms` (`{id, name, url, description?, icon?}` — funding channels), `tiers` (`{id, name, monthlyMinUsd?, description?}` — ordered display tiers), `sponsors` (`{name, url?, logo?, tier?, since?}` — `tier` matches a tier `id`, missing/empty places the sponsor in the "Individual supporters" bucket). The docs `/sponsor/` landing page (`docs/src/content/docs/sponsor.mdx`) renders the file via `docs/src/components/Sponsors.astro`; the topbar heart icon, the per-page footer link, the panel-side footer link (`web/themes/default/core/footer.tpl` — #1417 added a `data-testid="app-footer-sponsor"` anchor pointing at the same `/sponsor/` landing page), and `.github/FUNDING.yml`'s `custom:` URL all point at `/sponsor/`. A future README-injector script will read the same file. Adding a new platform (Open Collective, Patreon, …) is a one-line append to `platforms`; no component / config / template edit required, and no panel release needed (the panel link points at the docs anchor, not at any single platform URL). The docs page is intentionally absent from `astro.config.mjs`'s `sidebar` (reached only via the heart icon + footer + FUNDING.yml). Issues #1416 / #1417. |
 | Touch any UI under `web/install/` or the panel chrome that's screenshotted in docs | Run `npm run capture` in `docs/` locally and commit the PNG diff. Maintainers can alternatively apply the `safe-to-screenshot` label after reviewing the PR diff so `docs-screenshots-capture.yml` regenerates the captures (see `docs/README.md` for the security model + label-strip-on-push contract) |
+| Touch `web/includes/Export/**`, `web/export.php`, `web/pages/admin.export.php`, `web/includes/View/AdminExportView.php`, or `web/themes/default/page_admin_export.tpl` (the "Full data export" feature) | `AGENTS.md` (the "Full data export" Conventions block + the "Build / extend the owner-only full data export feature" row in "Where to find what" + the "Generate a presigned S3 PUT URL for the panel's Full data export S3 mode" row when the operator workflow changes) + `ARCHITECTURE.md` (the "Data export" subsystem section + the `web/includes/Export/` line in the Directory layout + the `web/export.php` line in the panel-root scripts list) + `docs/src/content/docs/configuring/data-export.mdx` (operator-facing — what's in the bundle, delivery modes, presigned-URL workflows per provider, the security model summary, troubleshooting). The wire-format contract (`null`-for-absent, Steam64-as-decimal-string, unix-seconds, manifest-first) is the load-bearing piece downstream consumers rely on — any change to the JSONL shape or manifest schema bumps `Manifest::FORMAT_VERSION` AND lands a paired downstream-migration note in the operator-facing docs. The forbidden-columns list (`admins.password` / `validate` / `attempts` / `lockout_until` / `servers.rcon` / `settings.smtp.pass` / `settings.telemetry.instance_id`) is hard-coded in `EntityExporter` — relaxing it silently invalidates the manifest's `pii_policy.password_hashes: "never"` attestation; never reach for "let me read the schema and deny dynamically" because a future column addition would slip through that gate. |
 | Change panel theme tokens — palette, geometry, semantic colors — in `web/themes/default/css/theme.css` (the `:root` block or `html.dark` overrides) | Mirror the change in `docs/src/styles/sbpp.css` so the docs site stays visually consistent with the panel. Same PR. (Fonts intentionally not mirrored — see #2.) |
 
 Quick rules:
@@ -195,7 +196,7 @@ block below for the rationale and the contributor-side responsibility.
 | ts-check       | `./sbpp.sh ts-check`                 | `ts-check.yml`         |
 | API contract   | `./sbpp.sh composer api-contract`    | `api-contract.yml`     |
 | Playwright E2E | `./sbpp.sh e2e`                      | `e2e.yml`              |
-| Plugin build   | `(cd game/addons/sourcemod/scripting && spcomp -i include sbpp_*.sp)` | `plugin-build.yml`     |
+| Plugin build   | `bash game/addons/sourcemod/scripting/scripts/resolve-plugin-version.sh` then `(cd game/addons/sourcemod/scripting && spcomp -i include sbpp_*.sp)` | `plugin-build.yml`     |
 | Prod Docker image (release-only) | `docker buildx build --platform linux/amd64,linux/arm64 -f docker/Dockerfile.prod .` | `docker-image.yml` (tag pushes + `workflow_dispatch` only — no per-PR run; contributor MUST run the local command before merging Dockerfile / entrypoint changes) |
 
 PHPStan specifics:
@@ -339,9 +340,12 @@ Plugin build specifics:
   multi-file shape) sees every error in one CI run instead of
   fix-push-fix-push round-trips.
 - No local `./sbpp.sh` wrapper. The dev stack doesn't ship spcomp
-  (it's not relevant to panel work), so plugin contributors install
-  spcomp themselves and run the literal command from the table
-  above. Untouched-plugin PRs: trust the gate.
+ (it's not relevant to panel work), so plugin contributors install
+ spcomp themselves and run the literal command from the table
+ above (the `resolve-plugin-version.sh` step first — release CI sets
+ `SBPP_RELEASE_VERSION` from the tag; local builds fall back through
+ `web/configs/version.json` → `git describe` → `dev`). Untouched-plugin
+ PRs: trust the gate.
 
 Prod Docker image specifics:
 
@@ -421,15 +425,17 @@ matching its directory. PSR-4 autoloads from `web/includes/` →
 | `Sbpp\Api\Api`                           | JSON API dispatcher                   |
 | `Sbpp\Api\ApiError`                      | structured API error                  |
 | `Sbpp\View\AdminTabs`                    | admin sub-route sidebar mounter       |
+| `Sbpp\View\BrandLogo`                    | `template.logo` resolver with `is_file()` fallback to `images/favicon.svg` — single source for the navbar + login chrome brand-mark renders; rejects path-traversal + null-bytes + the v1.x default (case-insensitive); fail-closed on missing `SB_THEMES` |
 | `Sbpp\View\Toast`                        | server-side toast emitter (`emit(kind, title, body, ?redirect)` — replaces v1.x `ShowBox(...)`) |
 | `Sbpp\View\*`                            | view DTOs (page-level + partials)     |
 | `Sbpp\Servers\SourceQueryCache`          | per-`(ip, port)` on-disk cache around the xPaw A2S probe (#1311) |
 | `Sbpp\Servers\RconStatusCache`           | per-`sid` on-disk cache around the RCON `status` command (#PLAYER_CTX_MENU) |
-| `Sbpp\Upload\UploadHandler`              | shared file-upload handler (size + extension allowlist + filename sanitiser) for the three popup upload pages — see `goals#5` |
+| `Sbpp\Upload\UploadHandler`              | shared file-upload handler (size + extension allowlist + filename sanitiser) for the three popup upload pages |
 | `Sbpp\Markup\IntroRenderer`              | admin-authored Markdown renderer      |
 | `Sbpp\Mail\Mail` / `Sbpp\Mail\Mailer` / `Sbpp\Mail\EmailType` | `Mail::send(...)` entry point + Symfony Mailer SMTP wrapper + email-type enum |
 | `Sbpp\Version`                           | three-tier `SB_VERSION` resolver (tarball JSON → git → `'dev'`) |
 | `Sbpp\Util\Duration`                     | minute-count humanizer for `sb_settings` token-lifetime echoes |
+| `Sbpp\Util\PlayerName`                   | hostile-input-shaped player display-name sanitiser for the `?name=` smart-default arm (#1440) |
 | `Sbpp\PHPStan\SmartyTemplateRule` (+ `Sbpp\PHPStan\SbppSyntaxErrorInQueryMethodRule` / `SbppPrefixAwareReflector` / `SbppNullReflector` under `web/phpstan/`) | bespoke PHPStan rules + DBA reflectors for the codebase |
 
 Legacy global names (`Database`, `CUserManager`, `Log`, `Api`, …) are
@@ -612,24 +618,61 @@ two idiomatic shapes (#1273):
 
 `./sbpp.sh db-seed` populates the dev DB (`sourcebans`) with a deterministic,
 realistic synthetic dataset across bans, comms, servers, admins, groups,
-submissions, protests, comments, notes, banlog, and the audit log. Use it
-when you need the panel surfaces (banlist, dashboard, drawer, moderation
-queues, audit log) to render with real-looking data instead of empty
-states. Acceptance audits and screenshot work both depend on it.
+submissions, protests, comments (per-type: B / C / S / P), notes, banlog,
+the audit log, AND demo evidence files (rows + on-disk files under
+`SB_DEMOS`). Use it when you need the panel surfaces (banlist, dashboard,
+drawer, moderation queues, audit log, "Review Demo" download flow) to
+render with real-looking data instead of empty states. Acceptance audits
+and screenshot work both depend on it.
 
 - Lives at `web/tests/Synthesizer.php` (`Sbpp\Tests\Synthesizer`); CLI
   driver at `web/tests/scripts/seed-dev-db.php`. Both are dev-only —
   the synthesizer refuses any `DB_NAME` other than `sourcebans`, so
   `sourcebans_test` / `sourcebans_e2e` stay untouched and the E2E
   suite (which builds its own rows per spec) is unaffected.
-- Idempotent: every run truncates the synth-owned tables first
-  (preserving `sb_settings` / `sb_mods` from `data.sql`), re-seeds the
-  CONSOLE + `admin/admin` rows, then inserts the synthetic dataset.
+- Idempotent: every run snapshots the filenames currently referenced
+  by `:prefix_demos` BEFORE the TRUNCATE wipes the table, executes
+  the truncates (preserving `sb_settings` / `sb_mods` from `data.sql`),
+  unlinks the snapshotted files AFTER (so rows + files drop visibly
+  together from the panel's POV — closes a transient pre-fix window
+  where rows pointed at files that had just been removed), re-seeds
+  the CONSOLE + `admin/admin` rows, then inserts the new synthetic
+  dataset (rows AND on-disk demo payloads). The wipe scope is the
+  set of filenames currently in `:prefix_demos`; anything else in
+  `SB_DEMOS` (the tracked `.gitkeep`, manual panel uploads, a dev's
+  SDK demoviewer working copy) survives untouched. `./sbpp.sh
+  db-reset` carries a sibling cleanup that strips MD5-named
+  basenames from `web/demos/` (those rows vanished with the DB
+  volume so they'd otherwise be permanent orphans).
 - Deterministic given a fixed `--seed` — `mt_srand($seed)` pins PHP's
-  RNG so two devs hit the same names/reasons/timestamps. Default seed
-  is `Synthesizer::DEFAULT_SEED` (pinned in code).
-- Three tiers: `--scale=small` (~30 bans, fast iteration), `medium`
-  (default, ~200 bans), `large` (~2000 bans for pagination / perf).
+  RNG so two devs hit the same names/reasons/timestamps AND so
+  `array_rand` picks the same parent IDs for demo attachment across
+  runs. Demo filenames ride `md5(seed|demtype|demid)` so re-seeds
+  round-trip identically and the next run's cleanup pass finds +
+  unlinks the prior set cleanly (filenames stay 32-char lowercase
+  hex, indistinguishable from `UploadHandler::handle()`'s
+  `renameToHash` output). Default seed is `Synthesizer::DEFAULT_SEED`
+  (pinned in code).
+- Three tiers: `--scale=small` (30 bans + 15 demos, fast iteration),
+  `medium` (default, 200 bans + 80 demos), `large` (2000 bans + 800
+  demos for pagination / perf). Comment budget per scale fans
+  exactly 60% Ban (`B`) / 20% Comm (`C`) / 10% Submission (`S`) /
+  10% Protest (`P`) (medium → 120/40/20/20); demo budget fans
+  exactly 80% ban-attached (`B`) / 20% submission-attached (`S`)
+  (medium → 64/16). Counts are exact (no rejection-sampling
+  shortfall) — `insertDemos()` uses `array_rand` for unique picks
+  upfront. The splits give each surface enough rows to render
+  without leaving the moderation-queue detail cards empty.
+- Demo payloads are opaque ~1 KiB text blobs carrying the synth
+  marker + parent ID, served verbatim by `getdemo.php` with
+  `Content-Type: application/octet-stream`. They won't replay in the
+  SDK demoviewer (would need a real Source-engine demo binary);
+  they DO exercise the panel's "Review Demo" download chrome end-to-end
+  (link → 200 → file download with `Content-Disposition`). On-disk
+  files land in `web/demos/`, which is gitignored alongside the
+  production demo-upload directory (the panel's `UploadHandler` writes
+  there too with `renameToHash: true`) so synthetic and real-production
+  uploads share one storage shape.
 - Do NOT reach for this from `Fixture::truncateAndReseed()` (the e2e
   hot path) — those two diverge by design. The synthesizer is for
   manual dev / screenshot work; the e2e fixture stays minimal so each
@@ -790,9 +833,15 @@ of the diff ship together or not at all.
   `ApiError('validation', …, 'steam')` envelope (each test now
   includes the `STEAM_0:0:1\n` / `[U:1:1]\n` / `76561197960265728\n`
   newline-bypass cases as #1423 follow-up #4 regression guards);
-  `web/tests/api/BansTest.php::testAddIpTypeAlwaysWritesEmptyAuthid`
-  pins the IP-type empty-`authid` contract (valid Steam input +
-  garbage + newline-bypass all write empty); the kickit / blockit
+  `web/tests/api/BansTest.php::testAddIpTypeKeepsValidatedSteamOfRecord`
+  pins the #1486 IP-type Steam-of-record contract (valid Steam input
+  is kept alongside the IP, no Steam input writes empty, garbage +
+  non-trimmable malformed shapes — mid-string `\n` — are rejected with
+  a `validation` envelope on the `steam` field BEFORE any row is
+  written, while a trailing-newline `STEAM_0:0:1\n` trims to a valid
+  `STEAM_0:0:1` and is kept; the shape gate still runs on the IP-type
+  branch so a junk value can't 500 or get stored); the
+  kickit / blockit
   `SteamID::compare()` pre-`isValidID()` gate is pinned by
   `KickitTest::testKickPlayerReturnsNotFoundForMalformedSteamId` /
   `testKickPlayerReturnsNotFoundForMalformedIp` and
@@ -816,20 +865,25 @@ of the diff ship together or not at all.
      the operator's raw input on the bounce so they see exactly
      what they typed and can correct the typo without re-typing
      everything else).
-   - `admin.edit.ban.php` ON IP-TYPE bans hard-codes
-     `$_POST['steam'] = ''` regardless of whatever the operator
-     typed in the Steam ID field — the column is the *steam id*
-     of the banned player; on an IP-type ban there is no steam id,
-     so the canonical value is the schema's `NOT NULL default ''`
-     empty string (matching `api_bans_add`'s same-PR fix). The
-     pre-#1423-follow-up-#4 shape (the `82e8c3d2` "canonicalise on
-     IP-type" nit) preserved the canonical-on-valid case but
-     failed to suppress the raw-on-invalid case AND continued
-     writing the canonicalised SteamID into `:authid` for IP-only
-     bans — both shapes are wrong. The form-side input remains
-     visible on the IP-type bounce path (re-emit through the
-     template `placeholder`, NOT a stale value), but the DB write
-     is divorced from it.
+   - `admin.edit.ban.php` ON IP-TYPE bans keeps a *validated* Steam
+     ID-of-record when the operator filled both fields (#1486 — parity
+     with `api_bans_add`'s IP-type branch), and writes the schema's
+     `NOT NULL default ''` empty string when the Steam ID field was
+     left blank. Enforcement stays IP-only (the SourceMod plugin
+     matches an IP ban on the `ip` column alone), so the stored authid
+     is inert plugin-side; it exists so the ban detail / banlist can
+     show which account the IP belonged to. The validate-before-convert
+     gate is still load-bearing: a non-empty Steam ID is run through
+     `SteamID::isValidID()` BEFORE `toSteam2()` so a garbage value
+     bounces with `$validationErrors['steam']` (raw input preserved on
+     the bounce, same as the Steam-branch typo path) instead of
+     escaping the converter as a 500 page render. Pre-#1486 the branch
+     hard-cleared `$_POST['steam'] = ''` regardless of input, dropping
+     a SteamID the operator deliberately typed; #1486 reversed that to
+     keep-when-valid. (The older `82e8c3d2` "canonicalise on IP-type"
+     nit had a worse shape still — it stored a *canonicalised* SteamID
+     but failed to suppress the raw-on-invalid case; #1486's
+     validate-then-convert ladder fixes both.)
    - `page.submit.php` doesn't call `SteamID::toSteam2()` at all —
      it stores the raw user-input verbatim in `:prefix_submissions`
      and the moderation queue resolves the canonical form on
@@ -888,6 +942,128 @@ of the diff ship together or not at all.
   `CSRF::validate(...)` or `CSRF::rejectIfInvalid()` (the dispatcher
   also accepts the token via the `X-CSRF-Token` header — `sb.api.call`
   sets it automatically).
+
+### Public auth surfaces: response-shape uniformity (no user enumeration)
+
+Any **publicly-reachable, unauthenticated** endpoint whose code path
+inspects `:prefix_admins` (or any other per-account row) MUST return a
+**response envelope whose shape, kind, title, and body are byte-for-byte
+identical** across the matched / unmatched / mail-failed / other-server-
+error branches. A user-visible differential — different error code,
+different toast `kind`, different title, different body wording — is a
+**user enumeration oracle**: a hostile visitor can hit the endpoint
+once per address, read the envelope back, and conclude whether the
+address has an admin account on this panel. That's #1456's bug class
+on the password-recovery flow (`api_auth_lost_password`); the rule
+generalises to every future surface that takes an identifier and looks
+it up against admin state.
+
+The contract:
+
+- **All success / not-found / mail-failed / transient-error branches
+  return the SAME envelope.** Use a single helper function (see
+  `_api_auth_lost_password_generic_response()` for the reference
+  shape) and call it from every reachable branch. Don't `throw new
+  ApiError('not_registered', …)` on the miss branch — that branches
+  the wire shape AND the painted toast on a per-account signal.
+- **Operator-side toggles ARE OK to surface.** Returning
+  `ApiError('disabled', …)` when `config.enablenormallogin` is off
+  is fine: the value is the same for every caller regardless of
+  what email they tried, so it doesn't reveal any per-account
+  signal. The matching page-handler guard must 302 away on the
+  same toggle so the form is never rendered, but curl-driven
+  callers reaching the JSON dispatcher get the structured `disabled`
+  envelope.
+- **Body copy stays neutral.** Don't write "a reset email has been
+  sent to your address" (leaks: existence) or "no account was found
+  for that address" (leaks: non-existence). Write the conditional
+  ("if that email is registered, …, please check your inbox and
+  spam folder") — the wording is identical across every branch.
+- **Audit-log discipline mirrors the response.** Log mail failures
+  / transient SMTP errors so an operator can diagnose them
+  (`Mail::send` already logs the underlying transport exception
+  via `LogType::Error`; the handler adds a paired entry that
+  pins the *action* that triggered the failure). Do NOT log the
+  miss branch — anonymous visitors get to write to `:prefix_log`
+  once per request would let a hostile actor flood the audit
+  table at request-rate; AND the log entries would themselves be
+  a side-channel into "this is an unknown email" visible to
+  anyone who can read the audit log.
+
+  Residual log-DoS surface (documented, NOT closed by #1456):
+  the matched-branch SMTP-failure path emits a log entry per
+  call. An attacker who knows a single registered email AND
+  catches the panel with broken SMTP can hammer the endpoint
+  to flood `:prefix_log` (and, as a side effect, roll the
+  legitimate user's outstanding `validate` token on every
+  request, invalidating any reset link in flight). Closing that
+  channel cleanly requires a per-(IP × email) rate limiter the
+  panel doesn't currently have. The pragmatic mitigation today
+  is the implicit one — SMTP failures should be rare on a
+  healthy deployment, and the audit-log table is acceptably
+  sized for the access pattern — but the surface is a tracking
+  follow-up; do not depend on it remaining quiet under attack.
+- **DB writes only happen on the matched branch.** Never UPDATE
+  or INSERT a row keyed on an attacker-supplied identifier when the
+  identifier didn't match — that's both a write amplification
+  vector (DoS the DB by hammering with random emails) AND would
+  leak via row-count / mtime / WAL traffic. The matched branch
+  performs the legitimate write (e.g. rolling the `validate` token);
+  the unmatched branch returns the generic envelope immediately.
+- **SMTP only fires on the matched branch.** Never email an
+  attacker-supplied address when no row matched — that turns the
+  endpoint into an open mail relay / spam gun (any visitor can use
+  the panel to send mail to any address). The generic envelope
+  lies to the user in the missed-branch case ("If that email is
+  registered, a link has been sent" → it wasn't, but they don't
+  get told), which is the intended behavior.
+
+**Caveat: response-time differential remains.** The matched branch
+performs a DB write + an SMTP round-trip; the unmatched branch
+returns immediately. A determined attacker can still enumerate by
+timing the round-trip — registered addresses take longer because
+they reach the SMTP layer. Closing the timing channel requires
+either a background-worker queued send (out of scope — the panel
+has no worker) or a deliberate "pad the miss with a fake SMTP
+delay" approach (brittle in practice: the matched-branch latency
+varies with the SMTP server's mood). The response-shape uniformity
+above is the load-bearing fix because it closes the trivially-
+exploitable channel that motivated the issue (a hostile visitor
+reading the painted toast title); the response-time leak is a
+documented residual risk that requires its own follow-up.
+
+Reference shape: `web/api/handlers/auth.php`
+(`api_auth_lost_password` + `_api_auth_lost_password_generic_response`).
+Regression guards: `web/tests/api/AuthTest.php`
+(`testLostPasswordResponseIsIdenticalForKnownAndUnknownEmail` is
+the canonical "byte-for-byte identical" assertion) +
+`web/tests/api/__snapshots__/auth/lost_password_generic.json` (the
+locked wire-format) + `web/tests/e2e/specs/flows/lostpassword-toast.spec.ts`
+(the chrome-side parity test — same painted toast for known +
+unknown emails).
+
+**Sibling surfaces still in scope for follow-up:** `api_auth_login`
+in `web/api/handlers/auth.php` ALSO branches its `Api::redirect()`
+target on per-account signals — empty-password vs. unknown-user vs.
+locked-account each redirect to a different `?m=…` flag on the
+login page, which the page handler then surfaces as different toast
+titles. The concrete oracle: POST `{username: 'admin', password: ''}`
+returns `?p=login&m=empty_pwd` (known user, empty-password
+short-circuit at `api_auth_login` line 50-52 runs BEFORE
+`NormalAuthHandler` so `attempts` is not incremented); POST
+`{username: 'doesnotexist', password: ''}` returns
+`?p=login&m=failed` (unknown-user short-circuit at line 41-43,
+never touches `:prefix_admins` at all). That's a one-request-per-
+username enumeration channel, no DB writes, no lockout
+interaction — the `attempts` counter only gates the password-
+attempt branch downstream, so the lockout-after-5 gate provides
+**no** protection against this surface (the gate fires on
+`NormalAuthHandler` failures, which the empty-password branch
+returns before reaching). Sized similarly to the pre-#1456
+`api_auth_lost_password` leak; tracked as a follow-up to #1456.
+Do not silently introduce a NEW public auth surface with the same
+branching shape — every new endpoint added here goes through the
+response-uniformity contract above.
 
 ### Permissions
 
@@ -964,6 +1140,35 @@ enum.
  string literals.
 - **Do not** reintroduce MooTools, React, or a runtime bundler.
  Self-hosters install by unzipping the release tarball.
+
+### Button class chains (`class="btn btn--ghost btn--icon"`)
+
+Every `<button>` / `<a>` chrome affordance that pulls the panel's
+button styling MUST carry the base `btn` token alongside any
+`btn--*` modifier:
+
+- `class="btn btn--primary"` ✓
+- `class="btn btn--ghost btn--icon"` ✓
+- `class="btn btn--secondary btn--sm"` ✓
+- `class="btn--ghost btn--icon"` ✗ — no `btn` base; `<button>`
+ falls back to UA-default chrome (visible grey 1px-border pill).
+
+Only `.btn` carries the load-bearing `background` / `color` /
+`border` / `display: inline-flex` / `padding` / `height`
+declarations — every modifier (colour or sizing) sets CSS
+custom properties + (for `.btn--sm` / `.btn--icon` / `.btn--xs`)
+adds a thin layer of geometry on top, but nothing applies the
+chrome without `.btn`. Order: base first, modifiers after. Pinned
+by `web/tests/integration/ButtonClassChainTest.php` (#1448);
+canonical anti-pattern entry under "Anti-patterns" with the
+user-reported regression details.
+
+The same rule applies to button strings emitted at runtime by
+`web/themes/default/js/theme.js`'s
+`renderDrawerBody()` / `renderDrawerLoading()` /
+`renderToast()` / `renderNotePane()` paths — the gate scans
+`*.js` too, so a copy-paste of the pre-#1448 broken shape into a
+new chrome surface fails CI at PR time.
 
 ### Loading state on action buttons (`window.SBPP.setBusy`)
 
@@ -1068,6 +1273,50 @@ The regression guards are paired:
  `animationDuration === "0.6s"` would catch the CSS-rule
  regression but not, say, a future `animation-play-state: paused`
  sneaking in via a parent rule.
+
+### User-facing text style (panel UI + docs)
+
+Every string the operator reads in the panel or on the docs site
+follows three rules:
+
+- **No emdash (`—`).** Use a comma, period, parentheses, or split
+ the sentence. The character is hard to type on most keyboards
+ and reads as AI-generated padding to many contributors. Hyphen
+ (`-`) is fine; en-dash (`–`) is fine in numeric ranges only.
+- **Terse.** One thought per sentence. Trim filler clauses
+ (`as you can see`, `please note that`, `it's worth mentioning`).
+ If a sentence can lose half its words and keep its meaning, lose
+ them.
+- **Don't over-explain.** Trust the operator. Say what they need
+ to do; skip the rationale unless it changes the action. The
+ docs page can carry one paragraph of context per section, not
+ three.
+
+Applies to:
+
+- Panel UI text in `web/themes/default/**/*.tpl` (toast titles +
+ bodies, button labels, form help text, empty-state copy, alert
+ banners, install-wizard chrome).
+- User-facing strings emitted from PHP page handlers
+ (`\Sbpp\View\Toast::emit(...)` titles + bodies, `echo` output,
+ inline `<div>` banners, error-page text).
+- Docs prose under `docs/src/content/docs/**/*.{md,mdx}` (any
+ page rendered to sbpp.github.io).
+
+Does NOT apply to:
+
+- `AGENTS.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`, `CLA.md`,
+ `docker/README.md`, `docs/README.md` (contributor-facing).
+- PHP / JS / Smarty code comments and docblocks.
+- Audit-log entries (`Log::add(...)` bodies are diagnostic, not
+ UX surface).
+- Test names, fixture data, snapshot bodies, and other
+ contributor-facing strings.
+
+Reach for the rewrite shape, not the strip-and-leave shape: an
+emdash usually marks a clause that's either a parenthetical
+(swap to parens), a continuation (period + new sentence), or
+filler (delete the clause).
 
 ### Server-side toast emission (`Sbpp\View\Toast::emit`)
 
@@ -1206,16 +1455,23 @@ timers, but the redirect is gated on the user's explicit X-click
 on the persistent toast. (No in-tree caller emits a mixed queue
 today; the contract is conservative for future surfaces.)
 
-Duration semantics (#1409):
+Duration semantics (#1409, default bumped to 6000ms in #1444):
 
 `$duration_ms` is optional and OMITTED from the wire format when
 the caller didn't pass an override — the chrome's `showToast`
 falls through to its `SHOWTOAST_DEFAULT_DURATION` constant
-(`4000` in `theme.js`). Three values are meaningful:
+(`6000` in `theme.js` post-#1444; was `4000` in the v2 RC chrome
+— the bump addressed the user-reported regression "notification
+appear top right and disappears very quickly" in issue #1444 by
+landing in the modern industry sweet spot, sitting alongside
+Bootstrap 5 Toast's 5000ms default and Material Design's
+~5500ms snackbar guideline for medium-length messages). Three
+values are meaningful:
 
 - `null` (default) — omit the field. The toast auto-dismisses
-  after `SHOWTOAST_DEFAULT_DURATION` (~4000ms). The right
-  choice for every routine info / success / warn confirmation.
+  after `SHOWTOAST_DEFAULT_DURATION` (~6000ms post-#1444). The
+  right choice for every routine info / success / warn
+  confirmation.
 - `0` — persistent. The chrome does NOT schedule an auto-dismiss
   timer at all; the only way the toast disappears is the user
   clicking the X button. Reserved for severe-error
@@ -1240,13 +1496,19 @@ worst-of-both outcome).
 
 `SHOWTOAST_DEFAULT_DURATION` lives in `theme.js`'s TOASTS
 block — single source for the chrome-side default. Don't
-mirror the literal `4000` into other tests or call sites;
+mirror the literal `6000` into other tests or call sites;
 reference the PHP-side `null` default and trust the chrome.
-The 4000ms default is itself a constant the project doesn't
-tune lightly — see the "Passing duration_ms = 0 for routine
-info / success toasts" Anti-patterns entry for the
-counter-direction (don't reach for `0` to dodge the timer
-on casual confirmations).
+The default is a constant the project doesn't tune lightly
+— #1444 bumped it from 4000ms to 6000ms after a user
+reported "notification appear top right and disappears
+very quickly", landing within the industry-norm 5000-6000ms
+band. The matching E2E spec (`toast-persistent-duration.spec.ts`)
+hardcodes timing thresholds derived from this constant; any
+future tweak MUST update both halves in the same commit
+(see the spec's docblock for the lockstep rationale). The
+counter-direction is "Passing duration_ms = 0 for routine
+info / success toasts" (Anti-patterns) — don't reach for
+`0` to dodge the timer on casual confirmations.
 
 The consumer-side gate in `flushPendingToasts` is
 `typeof data.duration_ms === 'number'`. A hostile / malformed
@@ -1258,6 +1520,95 @@ The typeof gate keeps the chrome's behaviour deterministic
 regardless of upstream noise; the encoder side already
 enforces an `int|null` PHP type so the only way a non-number
 lands on the wire is a hand-rolled malformed payload.
+
+Pause-on-hover / pause-on-focus (#1444):
+
+The auto-dismiss timer in `showToast` pauses when the mouse
+hovers the painted toast OR keyboard focus lands inside it,
+and resumes (from where it paused — NOT from the original
+full duration) when the user leaves the toast. The pair of
+contracts that make this work:
+
+- **Mouse arm**: `mouseenter` and `mouseleave` listeners on
+  the toast element. `mouseenter` clears the dismiss
+  `setTimeout` and records `remainingMs = duration - elapsed`.
+  `mouseleave` schedules a fresh `setTimeout` for
+  `remainingMs`.
+- **Keyboard arm**: `focusin` and `focusout` (the BUBBLING
+  pair — `focus` / `blur` don't bubble, so a tab landing on
+  the inner X button wouldn't fire them on the outer toast
+  element). Same pause / resume math as the mouse arm.
+
+Why both arms: the issue (#1444) was the user couldn't get
+a screenshot of the notification. The 4000ms → 6000ms bump
+covers the "I missed it entirely" case, but even 6s is
+tight for a screenshot (the user has to find the screenshot
+shortcut). Pause-on-hover gives the user unlimited time to
+read or capture; pause-on-focus extends the same affordance
+to keyboard / screen-reader users who Tab into the toast
+(they get the same "let me read this without scrambling"
+escape hatch the mouse user gets via hover).
+
+**Independent `hovered` and `focused` state** (#1444 review
+M-1): the pause/resume helpers track each input modality
+separately. `resumeIfIdle()` only restarts the dismiss
+timer when BOTH `hovered` AND `focused` are false.
+Collapsing them into a single "is the timer paused?" signal
+silently breaks multi-modal users: someone using mouse +
+keyboard simultaneously who tabs to the X button, then
+hovers in to read, then moves the cursor off while keeping
+focus on the X — the toast would auto-dismiss out from
+under them even though they're clearly still engaged.
+Real users hit this (Windows Narrator + mouse, JAWS + mouse,
+anyone running two input devices). Don't simplify the
+helpers back to a single-signal model.
+
+**Pause math runs on `performance.now()`** (#1444 review
+m-4): monotonic time. `Date.now()` (wall-clock) would
+clamp `remainingMs` to 0 after an NTP step-forward, a
+laptop suspend/resume mid-hover, a daylight-savings
+transition, or virtualisation clock skew — the next
+resume would schedule `setTimeout(..., 0)` and the toast
+would dismiss on the next tick. `performance.now()` is
+the right tool for measuring elapsed durations; the
+`Math.max(0, ...)` clamp stays defensively but is no
+longer the load-bearing fix.
+
+**X-button click cancels the timer explicitly** (#1444
+review m-3): `showToast` wires a per-toast click handler
+on the `[data-toast-close]` button that clears the
+in-flight timer and detaches the pause/resume listeners
+BEFORE removing the element. Without the explicit
+teardown, the click's focus-shift fires `focusout` on
+the (now-detached) toast, which calls `resumeIfIdle()`
+and schedules a fresh `setTimeout` whose closure pins
+the detached subtree until the timer fires (~remainingMs
+of transient memory per X-click; the eventual
+`el.remove()` on a detached node is a no-op so it's a
+code smell more than a leak). The document-level
+`data-toast-close` delegate stays as defence-in-depth
+for third-party themes that strip the per-toast wiring.
+
+Persistent toasts (`duration_ms: 0`) skip the hover hooks
+entirely — there's no timer to pause, and adding the
+hooks would be dead code. The chrome's `if (durationMs >
+0)` guard wraps the entire pause/resume scaffolding for
+the same reason. Don't reach for "let's add focus-pause
+to persistent toasts too" — the X-button is the only
+escape hatch on a persistent toast by design (#1409), and
+focus-pause without an auto-dismiss timer is a no-op.
+
+Regression guard: `web/tests/e2e/specs/flows/toast-hover-pause.spec.ts`
+covers both the mouse arm (hover for 7500ms — past the
+6000ms default — assert visible; unhover, wait 6500ms,
+assert dismissed) and the keyboard arm (focus the X
+button, same timing dance, assert pause / resume work).
+
+The contract has the same lockstep relationship with
+`SHOWTOAST_DEFAULT_DURATION` as the persistent-toast spec
+does: bumping the default ALSO requires bumping the spec's
+hover-wait threshold above the new default — see the
+spec's docblock for the math.
 
 ARIA role contract (#1409 review):
 
@@ -1354,8 +1705,8 @@ Regression guards:
   `commslist-getfallback-toast.spec.ts`, `admin-edit-comms-toast.spec.ts`,
   `toast-persistent-duration.spec.ts` (#1409 — drives a NOT-*
   branch's wire-format payload through the chrome and asserts
-  the toast is STILL visible past the default ~4000ms window;
-  the X-button dismiss is the only way out).
+  the toast is STILL visible past the default ~6000ms window
+  post-#1444; the X-button dismiss is the only way out).
 
 ### Loading state on drawers + lazy panes (`.skel` shimmer)
 
@@ -1467,50 +1818,145 @@ the class (light is the `:root` default, so removing would be a no-op
 anyway). It runs synchronously before the body parses, so the very
 first paint lands in the user's chosen mode.
 
+The bootloader writes TWO attributes on `<html>`:
+
+- `class="dark"` mirrors the *resolved* theme. `:root` carries
+ light tokens; `html.dark` overrides to dark. Tests and CSS read
+ this for "what's actually painted".
+- `data-theme-pref="light|dark|system"` mirrors the *preference*
+ verbatim (the localStorage value). The theme toggle's tri-state
+ icon CSS (`theme.css` `.theme-toggle__*`) gates on this so the
+ button shows the right sun / moon / monitor placeholder for the
+ *choice* — NOT the resolved theme — before `<body>` parses
+ (#1185 follow-up). Pre-followup the icon CSS gated on `html.dark`
+ so "system" mode was visually indistinguishable from whichever of
+ light/dark the OS resolved to.
+
 The contract:
 
-- The bootloader lives in `web/themes/default/core/header.tpl`
-  inside `<head>`, immediately above the stylesheet link. The
-  script is parser-blocking + synchronous, so the class is
-  guaranteed to be set before `<body>` parses regardless of where
-  in `<head>` it lives, but pinning it just above the stylesheet
-  makes the "this resolves the CSS cascade" intent obvious.
+- The bootloader lives in five template surfaces today (#1367 +
+ #1438): `web/themes/default/core/header.tpl` (the panel chrome's
+ `<head>`, every `index.php?p=…` render); `page_kickit.tpl` and
+ `page_blockit.tpl` (the two iframe-routed surfaces under
+ `pages/admin.kickit.php` / `pages/admin.blockit.php` that ship
+ their own self-contained `<head>` rather than riding the chrome);
+ `page_uploadfile.tpl` (the popup window opened by
+ `pages/admin.upload{demo,icon,mapimg}.php` via `window.open(...)`
+ from a dark-mode-aware parent admin page); and `updater.tpl` (the
+ standalone wizard rendered by `web/updater/index.php` on every
+ panel upgrade — logged-in admin context, body uses
+ `background:var(--bg-page);color:var(--text)` directly). All five
+ positions place the script inside `<head>` immediately above the
+ stylesheet link. The script is parser-blocking + synchronous, so
+ the class is guaranteed to be set before `<body>` parses
+ regardless of where in `<head>` it lives, but pinning it just
+ above the stylesheet makes the "this resolves the CSS cascade"
+ intent obvious.
+- The iframe-routed surfaces are reachable two ways: as `<iframe
+ src="pages/admin.kickit.php?…">` embedded inside the post-Ban /
+ post-Block success dialogs (legacy `sb.message.show` chrome on
+ the default theme), AND as TOP-LEVEL navigations from the public
+ Servers page's right-click context menu's "Kick player" item
+ (`web/scripts/server-context-menu.js` builds the href directly
+ to `pages/admin.kickit.php?check=…`). The latter is the
+ user-reported #1438 path: a dark-mode operator right-clicks a
+ player → picks Kick → the browser navigates to the chromeless
+ kickit template rendered as a full-page document → without the
+ bootloader the page paints stark white because `<html>` never
+ gets the `dark` class. The blockit iframe is `display:none` in
+ `page_admin_comms_add.tpl` today (operator never sees it), so
+ the dark-mode bug doesn't visibly affect blockit — but it ships
+ the bootloader for parity so a future "make blockit visible" or
+ "add a Block context menu item that navigates directly to
+ blockit" doesn't silently regress.
 - The script is a self-contained IIFE wrapped in `try/catch`:
-  `localStorage` throws on private-mode iframes / SecurityError,
-  and `matchMedia` is missing on very old browsers. In either
-  failure mode the bootloader silently falls through to light
-  (matching `theme.js`'s defensiveness).
+ `localStorage` throws on private-mode iframes / SecurityError,
+ and `matchMedia` is missing on very old browsers. In either
+ failure mode the bootloader silently falls through to light
+ (matching `theme.js`'s defensiveness).
 - The bootloader does NOT write to `localStorage` — `theme.js`
-  still owns persistence (its boot-time `applyTheme()` writes the
-  resolved mode back). The bootloader is read-only on the
-  persisted state.
+ still owns persistence (its boot-time `applyTheme()` writes the
+ resolved mode back). The bootloader is read-only on the
+ persisted state. The iframe templates DON'T load `theme.js` at
+ all (they only pull `api-contract.js` / `sb.js` / `api.js` —
+ the JSON dispatcher surface), so the bootloader IS the entire
+ theme-resolution path on those pages; the user's persisted
+ preference is read-only there and the chrome-side preference
+ write (via theme.js's boot or the toggle click) is what feeds
+ the iframe's read.
 - The bootloader uses `var` (not `let`/`const`) and avoids
-  optional chaining / nullish coalescing. The script runs in the
-  earliest realm setup phase; any syntax error means the whole
-  body would paint in light first. Strict ES5 keeps the surface
-  area defensive (theme.js itself uses ES6+, but theme.js failing
-  is recoverable — the bootloader failing is the FOUC bug).
-- Logic must stay byte-equivalent to `applyTheme(currentTheme())`
-  in `theme.js` minus the `localStorage.setItem(...)` write. If
-  `theme.js` ever changes the resolution rule (e.g., adds a
-  `'high-contrast'` mode), the bootloader has to mirror the
-  change in the same PR or the first paint silently desyncs from
-  the user's persisted preference.
+ optional chaining / nullish coalescing. The script runs in the
+ earliest realm setup phase; any syntax error means the whole
+ body would paint in light first. Strict ES5 keeps the surface
+ area defensive (theme.js itself uses ES6+, but theme.js failing
+ is recoverable — the bootloader failing is the FOUC bug).
+- Logic must stay SEMANTICALLY equivalent to
+ `applyTheme(currentTheme())` in `theme.js` (minus the
+ `localStorage.setItem(...)` write — theme.js owns persistence),
+ AND BYTE-equivalent across all five bootloader copies (after
+ whitespace normalization). The "semantically equivalent" part
+ carries the bootloader's three intentional defensive deltas vs
+ theme.js: it adds a `window.matchMedia &&` null check, the
+ outer `try/catch` swallows both `localStorage` and `matchMedia`
+ errors, and it uses `var`/no optional chaining for ES5-strict
+ parser tolerance. The "byte-equivalent across copies" part is
+ enforced by `IframeChromeAntiFoucBootloaderTest`'s
+ `testBootloaderBodiesAreEquivalentAfterNormalization` —
+ whitespace is normalized, but everything else must match
+ byte-for-byte. If `theme.js` ever changes the resolution rule
+ (e.g., adds a `'high-contrast'` mode), all five bootloader
+ copies have to mirror the change in the same PR or the first
+ paint silently desyncs from the user's persisted preference,
+ AND two sibling pages painted from the same `<a>`-click resolve
+ different themes on first paint.
 
-Regression guard: `web/tests/e2e/specs/flows/theme-fouc.spec.ts`.
-The spec uses `page.route` to intercept and STALL the `theme.js`
-network request, then asserts the state of `<html>`'s class list
-WHILE theme.js is held — i.e. the bootloader is the only thing
-that could have set the class. The contract: dark-pinned mode
-must read `class="dark"`, light-pinned mode must NOT, and system
-+ emulated OS-dark (via `colorScheme: 'dark'` on a fresh
-`chromium.newContext()`) must read `class="dark"` via the
-matchMedia branch. Releasing the route then lets theme.js boot
-normally so the post-load shape is asserted too. This is the
-only Playwright-tractable way to prove "the bootloader did it,
-not theme.js" — checking `readyState === 'loading'` was tried
-and fails because `addInitScript` runs before
-`document.documentElement` exists.
+Regression guards (two halves):
+
+- `web/tests/e2e/specs/flows/theme-fouc.spec.ts` covers the
+ chrome bootloader (`core/header.tpl`). The spec uses
+ `page.route` to intercept and STALL the `theme.js` network
+ request, then asserts the state of `<html>`'s class list WHILE
+ theme.js is held — i.e. the bootloader is the only thing that
+ could have set the class. The contract: dark-pinned mode must
+ read `class="dark"`, light-pinned mode must NOT, and system +
+ emulated OS-dark (via `colorScheme: 'dark'` on a fresh
+ `chromium.newContext()`) must read `class="dark"` via the
+ matchMedia branch. Releasing the route then lets theme.js boot
+ normally so the post-load shape is asserted too. This is the
+ only Playwright-tractable way to prove "the bootloader did it,
+ not theme.js" — checking `readyState === 'loading'` was tried
+ and fails because `addInitScript` runs before
+ `document.documentElement` exists.
+- `web/tests/e2e/specs/flows/iframe-anti-fouc.spec.ts` (#1438)
+ covers the kickit + blockit iframe templates. Simpler shape
+ because neither template loads `theme.js` — there's no
+ parallel path that could set the class, so a plain
+ `page.goto(KICKIT_URL)` + `toHaveClass(/dark/)` is sufficient.
+ The same three branches (dark / light / system-with-OS-dark)
+ are exercised, plus a blockit-parity branch so the two
+ templates stay in lockstep.
+- `web/tests/integration/IframeChromeAntiFoucBootloaderTest.php`
+ (#1438) is the static-grep gate. It asserts every required
+ bootloader fragment (`localStorage.getItem('sbpp-theme')`,
+ `|| 'system'`, `setAttribute('data-theme-pref', m)`,
+ `matchMedia('(prefers-color-scheme: dark)').matches`,
+ `document.documentElement.classList.add('dark')`) appears in
+ all five template files (`core/header.tpl`, `page_kickit.tpl`,
+ `page_blockit.tpl`, `page_uploadfile.tpl`, `updater.tpl`),
+ that the bootloader precedes `<link rel="stylesheet">` in each
+ (so a slow stylesheet response can't push the class-flip behind
+ first paint), that the bootloader bodies are byte-equivalent
+ across all five copies after whitespace normalization (so an
+ edit that updates only one copy's resolution logic fails the
+ gate — drift between copies means a user navigating between
+ sibling pages sees the theme flicker mid-flow), and —
+ defensively — that NO `*.tpl` file under `web/themes/default/install/`
+ carries the bootloader (the documented exemption below — the
+ install wizard runs against an unconfigured panel with no
+ `localStorage` to read). Catches drift edits that update one
+ bootloader copy and forget the others, OR "let's mirror the panel
+ chrome" sweeps that try to add the bootloader to the wizard
+ without also adding a paired theme toggle.
 
 The install wizard (`web/install/_chrome.tpl`) does NOT carry the
 bootloader. It runs against an unconfigured panel with no
@@ -1974,6 +2420,291 @@ any real content goes out — same shape `Sbpp\Telemetry\Schema1`'s
 lock file uses (file shape pinned by tests, content can change
 freely).
 
+### Full data export (`Sbpp\Export\*`)
+
+Owner-only, synchronous, one-shot streamed ZIP bundle of every row
+in the database plus every uploaded demo. Reachable at
+`?p=admin&c=export`; the actual streaming work lives at panel-root
+in `web/export.php` because the wire format is binary
+(`Content-Type: application/zip`) and doesn't fit the JSON API
+dispatcher's `Content-Type: application/json` contract — same shape
+as the long-standing `web/exportbans.php` (public ban-list export)
+and `web/getdemo.php` (single demo download).
+
+Subsystem shape: five classes under `Sbpp\Export\*`
+(`ManifestBuilder` / `EntityExporter` / `BundleWriter` /
+`S3PresignedUploader` / `ExportError`) plus the `Manifest` DTO, the
+`web/export.php` entry point, the `web/pages/admin.export.php` page
+handler, the `Sbpp\View\AdminExportView` DTO, and the
+`web/themes/default/page_admin_export.tpl` form template.
+
+The contract:
+
+- **Synchronous, in-request execution.** No queue, no background
+  worker, no FPM-only `fastcgi_finish_request()` trickery — the
+  request stays open for the full duration of the export. The
+  panel is shared-host-friendly first; reaching for a worker
+  daemon would close that door for the majority of self-hosters.
+  Shared-host hardening on the entry point is the three-pronged
+  triplet: `@set_time_limit(0)` (no max-execution-time abort),
+  `@ini_set('memory_limit', '256M')` (the writer streams, so the
+  resident set stays bounded; the bump is for the SELECT cursors
+  + the in-flight DEFLATE compression workspace), and
+  `ignore_user_abort(true)` (a client disconnect mid-stream must
+  NOT tear down the script — the audit-log entry needs to land
+  even on the abort path). The `@` guards a host with
+  `disable_functions = set_time_limit,ini_set` from injecting
+  warning text into the streamed response body.
+- **Two delivery modes (deliberately asymmetric).** The asymmetry
+  is structural — `zip` mode streams straight to `php://output`
+  with `flushAfterEntries=true` so the browser's download progress
+  bar moves in real time, while `s3` mode builds to a tempfile
+  under `SB_CACHE/exports/<bundle_id>.zip` and then PUTs the
+  finished file in a second cURL call. The reason for the
+  asymmetry: presigned S3 PUT signatures bind a specific
+  `Content-Length` value (and the spec rejects chunked-transfer-
+  encoded PUTs), so the bundle has to fully materialise before the
+  upload knows its size. The shutdown function registered BEFORE
+  the build wipes the tempfile even when a mid-build fatal
+  escapes — `if (is_file($tmp)) @unlink($tmp);` covers the
+  normal-exit + uncaught-Throwable + client-abort cases uniformly.
+- **Manifest-first contract.** `BundleWriter::write()` emits
+  `manifest.json` as the FIRST ZIP entry via `addFile()` BEFORE
+  any entity stream or demo file lands. A downstream consumer
+  can short-circuit the bundle to read just the PII policy / row
+  counts by parsing one central-directory entry. The contract is
+  pinned by `ExportBundleWriterTest`'s `statIndex(0)['name'] ===
+  'manifest.json'` assertion; the writer's structure is what makes
+  the assertion stable, NOT alphabetical ordering of the entity
+  list (which would land `admins.jsonl` first if you trusted
+  ordering alone).
+- **Zip64 enabled; per-mode caps.** The `ZipStream` is constructed
+  with the v3.x default (`enableZip64: true`); the previous
+  "No ZIP64" stance is gone (Windows 10+ Explorer, macOS Archive
+  Utility, every cloud console previewer, every CLI `unzip` since
+  ~2008 all handle Zip64 reliably — the consumer-compatibility
+  argument no longer holds in practice). The cap is now
+  **mode-conditional**, not ZIP-format-conditional:
+  - **Direct ZIP download** (`mode=zip`): no cap. Streams to
+    `php://output` over an arbitrarily long connection; the only
+    structural limit is whatever the operator's network / browser
+    tolerates.
+  - **S3 presigned PUT** (`mode=s3`): hard cap at
+    `Manifest::MAX_S3_PUT_BYTES = 5 * 1024**3` (5 GiB) minus
+    `SAFETY_MARGIN_BYTES = 64 * 1024**2`. The 5 GiB number is
+    structural to the S3 API — every S3-compatible provider
+    (AWS S3, Cloudflare R2, MinIO, Backblaze B2, Wasabi) rejects
+    single-PUT uploads above 5 GiB and requires multipart upload
+    above that, which is a fundamentally different flow than
+    presigned single-PUT. Above the cap the operator's only
+    sensible options are "switch to direct ZIP download" or
+    "prune data and retry".
+  The `BundleWriter` constructor takes an `?int $capBytes`: `null`
+  means "no cap, never throw" (zip mode); non-null is enforced as
+  the running compressed-byte total grows (s3 mode). The s3-mode
+  pre-flight in `ManifestBuilder` flags `$manifest->exceeds_cap`
+  upfront so the entry point can short-circuit BEFORE launching the
+  build AND the writer re-checks the running total per-entity
+  (defence-in-depth against pre-flight undershooting). The
+  manifest's `cap_bytes` / `exceeds_cap` field names are
+  preserved (no `FORMAT_VERSION` bump) but redefined to refer
+  specifically to the S3 PUT cap — on a direct-ZIP-download
+  bundle they remain informational rather than gating anything.
+- **JSONL wire contracts (uniform across every entity).** The
+  contracts are: `null` for absent values (never `""`, never an
+  omitted field — consumers can iterate `Object.keys()` confident
+  the set is stable per entity); timestamps as unix-seconds
+  integers (every `int(11) created` column gets `(int)`-cast,
+  every `datetime` column routes through `strtotime`); Steam64 IDs
+  as decimal STRINGS, not JSON numbers (Steam64 exceeds
+  `Number.MAX_SAFE_INTEGER` and silently round-trips wrong through
+  any consumer using double-precision floats; `authid_steam2`
+  preserves the legacy `STEAM_X:Y:Z` shape alongside); source PKs
+  renamed to `id` (`admins.aid` → `id`, `bans.bid` → `id`, etc.);
+  JSON encoder flags ALWAYS include `JSON_INVALID_UTF8_SUBSTITUTE`
+  (player names on `:prefix_bans.name` / `:prefix_comms.name` can
+  carry malformed UTF-8 from the pre-#1108 / #765 Latin-1-on-utf8
+  truncation shape — without the flag the export 500s mid-stream
+  on a hostile-historical row, same load-bearing reason `Toast::emit`
+  carries the flag). The contracts are wholesale documented in
+  `EntityExporter`'s class docblock; new entity additions inherit
+  the entire set.
+- **Forbidden columns are hard-coded.** `EntityExporter`'s class
+  constants `FORBIDDEN_ADMIN_COLUMNS`, `FORBIDDEN_SERVER_COLUMNS`,
+  and `FORBIDDEN_SETTING_KEYS` enumerate every value the bundle
+  MUST NEVER carry: `admins.password` (bcrypt hash),
+  `admins.validate` / `admins.attempts` / `admins.lockout_until`
+  (live session credentials), `servers.rcon` (RCON password), and
+  the `settings` rows with key `smtp.pass` (SMTP credential) or
+  `telemetry.instance_id` (deliberately panel-local). The filter
+  applies at the SQL `SELECT` / `WHERE` layer so the values never
+  reach PHP memory; the unit tests assert by grep that the values
+  literally don't appear in the JSONL output. The list is
+  intentionally pre-encoded — NEVER reach for "let me read the
+  schema and deny dynamically", because a future column addition
+  would silently slip through that gate. The manifest's
+  `password_hashes: "never"` PII attestation is operator-facing
+  and load-bearing on this contract.
+- **Owner-only.** Every PII category the panel knows about is in
+  scope (admin emails, IP addresses, every Steam ID, every unban
+  reason, every admin-authored comment, every note). A partial-
+  permission admin who could export everything is functionally an
+  owner, so granular delegation isn't meaningful. Deliberately
+  deferred to a future version when downstream consumers have
+  asked for a use case the current shape doesn't cover. The
+  gate's defence-in-depth shape is THREE layers: (1) page-builder
+  routes `?p=admin&c=export` to `admin.export.php` ONLY for
+  callers holding `ADMIN_OWNER`; (2) `admin.export.php` re-checks
+  via `CheckAdminAccess(ADMIN_OWNER)`; (3) `web/export.php`'s
+  entry-point checks `$userbank->HasAccess(WebPermission::Owner)`
+  immediately after the CSRF gate and lands a `LogType::Warning`
+  row in the audit log on the deny branch so a triage flow can
+  find the attempt. The chrome-side filtering on navbar +
+  PaletteActions hides the entry from non-owners but is UX gating
+  only — the load-bearing security gate is the entry point.
+- **No new permission flag.** `ADMIN_OWNER` only.
+  `web/configs/permissions/web.json` is UNTOUCHED; no new
+  `Perms.*` member, no `api-contract.js` regen, no new
+  `WebPermission` enum case. The reasoning matches "Owner-only"
+  above — the feature's PII surface is the full panel dataset,
+  and a granular flag whose holder can export everything is
+  indistinguishable from `ADMIN_OWNER` itself.
+- **No schema change.** V1 is one-shot — every export starts from
+  a fresh pre-flight pass. No `:prefix_exports` table, no
+  scheduled-job state, no persistent in-DB tracking. The audit
+  log (`Log::add(LogType::Message, 'Data Export', ...)` on
+  success, `LogType::Error` on failure) carries the durable
+  record per attempt: acting admin's `aid`, the mode (`zip` vs
+  `s3`), the bundle's UUIDv4, the estimated + actual byte counts,
+  and the `ExportError::code()` on the failure branch. No paired
+  updater migration ships with this subsystem.
+- **No JSON API handler.** The entry point at `web/export.php` is
+  a top-level streaming script with a binary wire format (`Content-Type:
+  application/zip`); the JSON API dispatcher's contract is JSON
+  envelopes, with no extension point for streaming binary. Reaching
+  for a JSON handler that returns a download URL was considered
+  and rejected because the download URL would itself need to land
+  on a panel-root streaming script (the same problem one indirection
+  removed). The pattern is symmetric to `exportbans.php` and
+  `getdemo.php`; future binary-wire features land at panel-root
+  too.
+- **Error handling.** The entry point catches ONLY `ExportError`
+  — anything else (a real DB outage, a memory exhaustion, a
+  regression in the writer) propagates to the dispatcher's generic
+  500 so the stack trace lands in the audit log via the project's
+  error handler. Catching `\Throwable` blanket would mask real
+  bugs behind a generic "export failed" toast. The supported
+  `ExportError` codes are class constants (`CAP_EXCEEDED`,
+  `S3_PUT_FAILED`, `PRESIGN_INVALID_SCHEME`,
+  `PRESIGN_INVALID_URL`, `DISK_WRITE_FAILED`, `DISK_FULL`) so
+  call sites can't typo a string literal; `web/pages/admin.export.php`'s
+  `sbpp_admin_export_describe_error()` `match` table maps each
+  code to an operator-readable toast body.
+- **Persistent error toast on the redirect-back branch.** The
+  page handler's `?result=error&code=<code>` arm emits via
+  `\Sbpp\View\Toast::emit('error', 'Export failed', ..., null, 0)`
+  — `duration_ms: 0` (persistent) with `$redirect: null` per the
+  Toast contract. Destructive operations that failed mid-flight
+  carry potential cleanup work for the operator (a stale tempfile,
+  an upstream charge), and the operator MUST acknowledge before
+  moving on. The success arm emits a non-persistent confirmation
+  via the default chrome timing — routine success doesn't need
+  the X-click acknowledgement. See "Server-side toast emission"
+  earlier in this file for the full contract.
+- **S3 scheme guard is unconditional.** `S3PresignedUploader`
+  refuses `http://` URLs server-side regardless of caller — the
+  bundle carries the full panel PII dataset; cleartext transit
+  for that workload is unsupported. The form template's
+  `pattern="^https://[^\s]+$"` HTML5 attribute is the UX-first
+  gate; the server-side `parse_url` + scheme check is the
+  load-bearing security gate. URL parse failures raise
+  `PRESIGN_INVALID_URL` BEFORE any network call fires.
+- **No `try/catch (\Throwable)` around the entry point body.**
+  Per the "Error handling" entry above. The only legitimate
+  catches in the entry point are the two specific `ExportError`
+  catches (pre-flight, mid-build) — both surface the error code
+  to the redirect URL and the audit log. Anything else
+  intentionally falls through to the dispatcher's 500.
+
+Test override: `S3PresignedUploader::_setHttpTransportForTests(?callable
+$transport)` swaps the cURL call with a closure that receives
+`(string $url, string $localPath, int $size): array{http_code: int,
+body: string}` and returns the shape the production path produces.
+Mirrors `Sbpp\Announce\AnnouncementFetcher::_setHttpFetcherForTests`
++ `Sbpp\Servers\SourceQueryCache::setProbeOverrideForTesting`.
+Production code never sets it; integration tests use it to pin the
+wire-layer contract without spinning up a real S3 endpoint.
+
+Regression guards:
+
+- `web/tests/unit/EntityExporterTest.php` — per-entity contract:
+  `FORBIDDEN_*` columns never appear in the JSONL, SteamID
+  conversion produces decimal strings, `comms.mute_kind` enum,
+  partial-removal `state` derivation across the
+  `BanType × BanRemoval` matrix, empty-entity yields no lines,
+  the `null`-for-absent contract, the `log.level` derivation,
+  the unix-seconds timestamp contract.
+- `web/tests/unit/ManifestBuilderTest.php` — cap math constants
+  (`MAX_S3_PUT_BYTES`, `SAFETY_MARGIN_BYTES`), UUIDv4 shape
+  (regex + version + variant nibbles), bundle ID uniqueness
+  across builds, `created_at` is integer unix seconds,
+  `pii_policy` block presence + every required field,
+  `format_version = 1`, `toJson()` output shape.
+- `web/tests/integration/ExportBundleWriterTest.php` — full
+  export against the test fixture. Asserts the manifest-first
+  contract (`statIndex(0)['name'] === 'manifest.json'`),
+  manifest's `row_counts.<entity>` equals the literal
+  newline-separated line count in `entities/<entity>.jsonl`,
+  every demo entry's compression method is `ZipArchive::CM_STORE`,
+  every JSONL line parses as a JSON object with an `id` field,
+  no SteamID appears as a JSON number (grep for
+  `"authid":\s*\d+`), every timestamp field is integer,
+  forbidden column values never appear in the bundle (grep for
+  bcrypt hash patterns / `rcon` password values / `smtp.pass`
+  values / `telemetry.instance_id` values).
+- `web/tests/integration/AdminExportPermissionTest.php` — the
+  static-shape permission gate: the navbar entry, the
+  PaletteActions entry, the page-builder route, the page
+  handler's `CheckAdminAccess` call, and the entry-point's
+  `HasAccess(WebPermission::Owner)` check all key on
+  `ADMIN_OWNER`. Catches a future "let me sneak this through
+  on a partial flag" refactor at PR time.
+- `web/tests/integration/AdminExportRuntimePermissionTest.php`
+  — the runtime-primitive gate: `CSRF::validate()` returns the
+  expected verdict on the canonical valid + invalid + empty
+  token cases; `CUserManager::HasAccess(WebPermission::Owner)`
+  returns the expected verdict for an owner / non-owner / no-
+  session caller; the `SourceMod root char alone` case doesn't
+  grant `WebPermission::Owner` (defence against a future SM-char
+  delegation that would otherwise sneak through). Page-handler
+  `require` tests were tried and dropped because PHP's `exit`
+  (called by `CheckAdminAccess`) is uncatchable and terminates
+  the child process before PHPUnit can serialize results; the
+  Playwright spec covers the end-to-end runtime contract
+  instead.
+- `web/tests/integration/S3PresignedUploaderTest.php` — the
+  wire-layer contract via `_setHttpTransportForTests`. Asserts:
+  `http://` URL rejected with `PRESIGN_INVALID_SCHEME` (no
+  transport call fires), non-URL string rejected with
+  `PRESIGN_INVALID_URL`, happy path passes the correct
+  `(url, localPath, size)` triple to the transport, success
+  codes 200/201/204 don't throw, 403 throws `S3_PUT_FAILED`
+  with the response body truncated to 2 KiB in the exception
+  message, the byte-stable error code constants stay byte-stable.
+- `web/tests/e2e/specs/flows/data-export.spec.ts` — end-to-end:
+  log in as the seeded `admin/admin` (owner storage state),
+  navigate to `?p=admin&c=export`, click the "Export as ZIP"
+  submit button (anchored on `[data-testid="admin-export-zip-submit"]`),
+  capture the streamed download via `page.waitForEvent('download')`,
+  parse the resulting ZIP with `jszip`, assert: zip parses,
+  first entry is `manifest.json`, manifest carries
+  `format_version: 1` + valid UUIDv4 `bundle_id` + integer
+  `created_at` + `row_counts` dict (with `admins >= 1`) + the
+  `pii_policy.password_hashes: "never"` attestation. Also
+  asserts `GET /export.php` returns HTTP 405 (POST-only
+  enforcement). The spec covers the marquee end-to-end shape
+  the static + primitive tests can't reach.
+
 ### Admin-authored display text (`Sbpp\Markup\IntroRenderer`)
 
 - Anything an admin types in the panel that we render to other users
@@ -2277,11 +3008,13 @@ the spec, target a 1920px viewport, not 1440px.
 ### Contributor License Agreement gate (`web/**`)
 
 Pull requests that touch `web/**` are gated on a signed Contributor
-License Agreement. The web panel is dual-licensable (free for hobby /
-community use under CC BY-NC-SA 3.0; separate commercial licence for
-production use by hosting providers), and the CLA is the mechanism
-that lets the maintainer relicense future contributions without
-contacting every contributor individually.
+License Agreement. The web panel is dual-licensable (free under the
+Elastic License 2.0 for hobby / community / self-hosted use; separate
+commercial licence for game-server hosts offering the panel as a
+managed service to third parties — see [`LICENSE.txt`](LICENSE.txt)
+and the README "License" section for the contract details), and the
+CLA is the mechanism that lets the maintainer relicense future
+contributions without contacting every contributor individually.
 
 - Agreement text: [`CLA.md`](CLA.md). Ten sections, ~1 page. Contributor
   keeps copyright; maintainer gets a perpetual, irrevocable, worldwide,
@@ -2321,10 +3054,19 @@ contacting every contributor individually.
   `custom-pr-sign-comment`, the `if:` matches against the same string
   to gate execution, and CLA.md §10 is what the contributor is told
   to type. Drift between any two silently breaks the signing flow.
-- Historical contributors haven't signed; their pre-CLA web-panel
-  contributions aren't covered by the new grant. Retroactive sign-off
-  is a separate piece of work (opt-in follow-up) and isn't blocked
-  by the workflow being in place.
+- Historical-contributor coverage was the precondition for the
+ ELv2 relicense and was resolved by the project's pre-CLA
+ contribution audit: every pre-CLA `web/**` contribution of
+ substance was authored by `rumblefrog`, who as the project
+ maintainer is also the licensor under ELv2. The handful of small
+ one-off external PRs from before the CLA workflow landed either
+ (a) survived intact through the v2.0 panel rewrite (in which case
+ the CLA's §3(b) relicense grant covers them going forward,
+ pending sign-off), or (b) were removed during the v2.0 rewrite
+ (in which case the question is moot). Future inbound PRs are
+ covered by the workflow as designed. Retroactive sign-off for the
+ surviving-author set is still an opt-in follow-up but is not on
+ the critical path for the ELv2 relicense.
 
 ## Anti-patterns (do NOT reintroduce)
 
@@ -2336,8 +3078,8 @@ contacting every contributor individually.
  ```php
  <?php
  // SourceBans++ (c) 2014-2026 SourceBans++ Dev Team
- // Licensed under Creative Commons Attribution-NonCommercial-ShareAlike 3.0.
- // See LICENSE.md for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
+ // Licensed under the Elastic License 2.0.
+ // See LICENSE.txt for the full license text and THIRD-PARTY-NOTICES.txt for attributions.
  ```
 
  Smarty `.tpl` files use the `{* … *}` shape with the same three
@@ -2347,12 +3089,16 @@ contacting every contributor individually.
  was 100% v2.0 expression), it shipped two parallel year ranges
  (`2014-2024` and `2014-2026`) with no automated drift gate, and
  it pointed at `creativecommons.org/licenses/by-nc-sa/3.0/` for
- the licence text but `LICENSE.md` is the actual licence. The
- source-of-truth attribution surface for upstream lineage
- (SourceBans 1.4.x, SourceComms, InterWave Studios theme.conf,
- LightOpenID, TinyMCE) is `THIRD-PARTY-NOTICES.txt`. Issue
- `goals#5` swept all 36 files; new files take the 4-line shape
- from day one. Files with their own licence (`web/includes/Auth/openid.php`,
+ the licence text but the project's actual root license file
+ (today `LICENSE.txt`, formerly `LICENSE.md`) is the source of
+ truth. The source-of-truth attribution surface for upstream
+ lineage (SourceBans 1.4.x, SourceComms, InterWave Studios
+ theme.conf, LightOpenID, TinyMCE) is `THIRD-PARTY-NOTICES.txt`.
+ The v2.0 rewrite swept all 36 files onto the 4-line shape; the
+ license-name + filename swap from CC-BY-NC-SA / `LICENSE.md` to
+ ELv2 / `LICENSE.txt` rode the same PR that landed `LICENSE.txt`.
+ New files take the 4-line shape from day one. Files with their
+ own licence (`web/includes/Auth/openid.php`,
  `web/includes/tinymce/`) keep their original headers.
 - Inline `echo '<form action="…">'` HTML blobs at the top of
  admin page handlers (`web/pages/admin.edit.<x>.php`) → build a
@@ -2367,7 +3113,8 @@ contacting every contributor individually.
  is set in `init.php`); the only escape hatch is `nofilter` which
  carries its own annotation rule (see "`nofilter` discipline" in
  Conventions). The `admin.edit.*` cluster was migrated wholesale
- in `goals#5`; new edit pages follow the same shape from day one.
+ in the v2.0 rewrite; new edit pages follow the same shape from
+ day one.
 - `echo '<div id="msg-red">…';` / `echo '<div id="msg-green">…';`
  inline-PHP error / success banners → use Smarty's
  `{if $error}<div class="alert alert--error">{$error|escape}</div>{/if}`
@@ -2382,8 +3129,8 @@ contacting every contributor individually.
  silent invisible div forever. The legacy markup also escaped
  nothing — `echo '<div id="msg-red">' . $username . ' is taken</div>'`
  was a stored-XSS surface for any field that survives validation.
- Migrated wholesale in `goals#5`. Search anchor for any future
- sweep: `rg "msg-(red|green)" web/`.
+ Migrated wholesale in the v2.0 rewrite. Search anchor for any
+ future sweep: `rg "msg-(red|green)" web/`.
 - Legacy 1.4.11 JS handler names — `ButtonOver(…)`,
  `ProcessEditAdminPermissions(…)`, `ProcessEditGroup(…)`,
  `ProcessEditMod(…)`, `ProcessEditServer(…)`, `errorScript(…)`
@@ -2395,13 +3142,67 @@ contacting every contributor individually.
  page rendered, the button looked clickable, the click did
  nothing — not even a console error). The legacy handler names
  are documented here defensively because `rg` searches against
- third-party theme forks may still surface them; the
- `goals#5` sweep removed every reference under `web/themes/default/`,
- but a fork that copy-pasted the templates pre-#1123 D1 will
- still carry them. Wire to `sb.api.call(Actions.PascalName, …)`
+ third-party theme forks may still surface them; the v2.0 rewrite
+ removed every reference under `web/themes/default/`, but a fork
+ that copy-pasted the templates pre-#1123 D1 will still carry them.
+ Wire to `sb.api.call(Actions.PascalName, …)`
  via `data-action` + a page-tail vanilla-JS dispatcher per the
  canonical confirm-modal shape under "Add a confirm + reason
  modal" in "Where to find what".
+- `typeof window.<LegacyHelper> === 'function'` guards on a v1.x
+ helper inside a v2.0 page-tail handler (e.g.
+ `typeof window.ShowKickBox === 'function'` for the kick-on-ban
+ surface; `typeof window.TabToReload === 'function'` for the
+ post-action page-reload trigger) → both were defined in
+ `web/scripts/sourcebans.js`, deleted at #1123 D1 (v2.0.0). The
+ `typeof` test silently resolves to `false`, the body of the
+ `if` never runs, AND no console error fires — so the surrounding
+ success branch falls through to a generic toast while the
+ actual side-effect (kick a player, reload the tab) silently
+ doesn't happen. This is the worst class of UI regression: the
+ chrome reads as success while the load-bearing action never
+ fired. The kick-on-ban path was the canonical case (#1441 —
+ operators reported "banning doesn't kick" on the v2.0 panel; the
+ DB row landed and SourceMod's on-connect check did reject
+ subsequent connects, but the player's existing session stayed
+ alive until they voluntarily disconnected, often 20-40min later
+ on a low-turnover server). The fix shape is the existing
+ comms.add → blockit.php iframe pattern (canonical:
+ `web/themes/default/page_admin_comms_add.tpl`'s
+ `Actions.CommsAdd .then()` handler; mirrored at
+ `web/themes/default/page_admin_bans_add.tpl`'s
+ `Actions.BansAdd .then()` handler post-#1441): create a hidden
+ `<iframe id="srvkicker" style="display: none">` pointing at
+ `pages/admin.kickit.php?check=…&type=…` and let the iframe's
+ server-side template enumerate enabled servers and fire the
+ rcon kick command via `Actions.KickitLoadServers` +
+ `Actions.KickitKickPlayer`. Mirror the comms.add structure
+ (success branch keeps button busy through a 2s page reload, no
+ `setBusy(btn, false)` in that branch). **The URL parameter
+ `check=` is symmetric across both surfaces; the JS envelope
+ field names are NOT — `r.data.block.steam` on comms.add,
+ `r.data.kickit.check` on bans.add — because `api_bans_add` and
+ `api_comms_add` chose different envelope shapes. Read the
+ server-side response shape FIRST when porting between the two
+ branches; the field-name asymmetry is structural API drift, not
+ a contract violation.** Regression guard:
+ `web/tests/e2e/specs/flows/ban-kickit-iframe.spec.ts` (pins the
+ iframe-spawn contract end-to-end — stubs both
+ `Actions.BansAdd` AND `pages/admin.kickit.php` at the network
+ layer so the spec stays robust under multi-worker DB pressure
+ against the shared `sourcebans_e2e` DB, with `toBe(1)` on the
+ iframe-request count so a future double-mount regression
+ surfaces immediately). The deeper rcon round-trip is exercised
+ by `web/tests/e2e/specs/flows/kickit-iframe.spec.ts` (#1433 —
+ the topbar-context-menu path through the same
+ `pages/admin.kickit.php` document) plus
+ `web/tests/api/KickitTest.php` (PHPUnit — handler permission +
+ malformed-input envelopes). Search anchor for any future sweep:
+ `rg "typeof window\.\w+ === 'function'" web/themes/` —
+ every such guard is a probable dead-helper trap unless the
+ helper is in fact still defined somewhere (e.g.
+ `window.SBPP.showToast` from `theme.js`, which IS the live
+ contract).
 - MooTools `$('id').value` / `$('id').checked` / `$('id').setStyle(…)`
  idioms in inline page-tail scripts → MooTools is gone (deleted
  with sourcebans.js at #1123 D1). Use vanilla DOM:
@@ -2411,9 +3212,9 @@ contacting every contributor individually.
  silently because nothing defined it post-#1123, so old `$('id').value`
  reads returned `undefined.value` → `TypeError`. Page-tail
  scripts inside templates use plain DOM access plus the
- `window.SBPP.showToast` / `setBusy` chrome helpers. The
- `goals#5` admin.edit.* sweep removed every surviving call site;
- don't reintroduce. (The `sb.$id` / `sb.$idRequired` helpers in
+ `window.SBPP.showToast` / `setBusy` chrome helpers. The v2.0
+ admin.edit.* sweep removed every surviving call site; don't
+ reintroduce. (The `sb.$id` / `sb.$idRequired` helpers in
  `web/scripts/sb.js` are the canonical shape for code that ships
  with the panel; inline page-tail scripts can use either shape.)
 - The DELETE-then-INSERT loop on
@@ -2428,8 +3229,8 @@ contacting every contributor individually.
  etc. The schema doesn't carry a UNIQUE on the (admin_id,
  server_group_id) / (server_id, group_id) pairs, so collapsing
  to `INSERT … ON DUPLICATE KEY UPDATE` would need a paired
- schema migration (out of `goals#5`'s scope; tracked as a
- follow-up). Until then, transactions are the contract — see
+ schema migration (tracked as a follow-up). Until then,
+ transactions are the contract — see
  `web/pages/admin.edit.adminservers.php` and
  `web/pages/admin.edit.server.php` for the canonical shape.
 - Hand-rolled per-page upload handling — `move_uploaded_file($_FILES['x']['tmp_name'], $dst)`
@@ -2439,7 +3240,7 @@ contacting every contributor individually.
  wraps every step (CSRF, permission gate, extension allowlist,
  filename sanitisation via `sanitiseName()`, the `move_uploaded_file()`
  call, the audit-log entry, the success / error popup chrome).
- The pre-`goals#5` shape duplicated all of this across the three
+ The pre-v2.0 shape duplicated all of this across the three
  popup upload pages (`admin.uploaddemo.php`, `admin.uploadicon.php`,
  `admin.uploadmapimg.php`) and trusted `$_FILES[…]['name']`
  verbatim — so a `name=../../etc/passwd` upload could escape
@@ -2448,6 +3249,51 @@ contacting every contributor individually.
  to defend the path. New popup-upload surfaces wire through
  `UploadHandler::handle()`; never `move_uploaded_file()`
  directly.
+- `class="btn--ghost btn--icon"` (or any other modifier-only chain
+ of `.btn--*` classes without the base `btn` token) on a `<button>`
+ / `<a>` chrome affordance → always ship `class="btn btn--ghost
+ btn--icon"` (base token first, modifiers after). The base `.btn`
+ rule in `theme.css` is the load-bearing site that declares the
+ `--btn-bg` / `--btn-color` / `--btn-border` / `--btn-bg-hover`
+ custom-property defaults AND applies them as `background` /
+ `color` / `border` / `display: inline-flex` / `padding` /
+ `height` declarations. The colour-modifier rules (`.btn--ghost`,
+ `.btn--primary`, `.btn--secondary`, `.btn--danger`) are pure
+ custom-property overrides — they set `--btn-bg` / `--btn-color`
+ / `--btn-border` / `--btn-bg-hover` and that's all. The sizing
+ modifiers (`.btn--sm`, `.btn--icon`, `.btn--xs`) layer geometry
+ on top (`width` / `height` / `padding` / `font-size`) but still
+ don't carry the load-bearing `background` / `color` / `border`
+ / `display: inline-flex` declarations — those live exclusively
+ on `.btn`. Without `.btn` in the same class chain the variables
+ get set but nothing reads them, so the `<button>` falls back to
+ the user-agent default chrome (typically a visible grey
+ 1px-border pill). The marquee user-reported regression: pre-#1448
+ `core/title.tpl`'s mobile burger menu shipped
+ `class="btn--ghost btn--icon"`, which on mobile (where
+ `[data-mobile-menu]` flips from `display: none` to `display:
+ inline-flex` at `<=1024px`) rendered a glaring grey square in
+ the top-left of the topbar, fighting the dark theme's near-black
+ background (#1448's screenshot). Sister sites swept in the same
+ PR: `core/footer.tpl`'s palette `Esc` button (live bug — same
+ wrong-chrome shape as the burger button), and the
+ `partials/player-drawer.tpl` reference template (documentation
+ sync — the live drawer chrome is rendered by
+ `web/themes/default/js/theme.js`, which always shipped the
+ correct three-class chain). Regression guard:
+ `web/tests/integration/ButtonClassChainTest.php` (parser-style
+ sweep across `web/themes/`, `web/pages/`, `web/includes/View/`,
+ `web/install/`, `web/updater/`, `web/api/handlers/`, AND
+ `web/scripts/` + `web/themes/default/js/` for `*.tpl` / `*.php`
+ / `*.js` — every `class="..."` attribute carrying a `btn--*`
+ modifier MUST also carry the base `btn`). Class attributes
+ containing `{` (Smarty-conditional shapes) are skipped — the
+ gate doesn't expand templates, so it can't validate which branch
+ a given token came from. False negatives are bounded to chains
+ with NO base in any branch (e.g.
+ `class="{if $x}btn--primary{else}btn--ghost{/if}"`); none in
+ the codebase today, would surface as a visible UA-default render
+ whenever the conditional path runs.
 - `btn.disabled = true` (or any other manual `disabled` flip) inside
  a confirm-modal submit handler or any other action button that
  fires `sb.api.call(...)` from a click handler without an immediate
@@ -2518,43 +3364,91 @@ contacting every contributor individually.
  default `none`). Same shape applies to any new skeleton surface:
  reuse the `.skel` class from `theme.css`; don't roll a new
  `.skeleton-*` rule.
-- Removing the inline anti-FOUC bootloader from `<head>` of
- `web/themes/default/core/header.tpl` ("theme.js already does this
- on boot, why does it have to be inline?") → theme.js loads from
- `core/footer.tpl` (the document tail), so its boot-time
- `applyTheme(currentTheme())` runs AFTER the parser reaches `</body>`.
- By that point the browser has already painted the entire body in
- light mode (the `:root` tokens default to light), and theme.js's
- class flip triggers a full repaint the user perceives as a white
- flash + content flicker on every page navigation (#1367 — the
- reporter's exact symptom: "the page briefly renders in light mode
- for a split second before switching back to dark"). The bootloader
- is the inline-script-in-`<head>` pattern every modern theme-toggle
- implementation uses (Tailwind docs, Next.js docs, GitHub, Vercel)
- — it has to run BEFORE the body parses, which means it has to be
- inline (no external `<script src=…>` because the network round-trip
- would defeat the point) and it has to be in `<head>` (so the parser
- reaches it before the body tags). Regression guard:
- `web/tests/e2e/specs/flows/theme-fouc.spec.ts` uses `page.route`
- to stall the `theme.js` network request, then asserts the `dark`
- class is present (or absent, in light mode) on `<html>` WHILE
- theme.js is held — proving the bootloader, not theme.js, did
- the class flip. Pre-fix the dark / system arms read `false` (no
- class because theme.js was stalled and was the only path); post-fix
- they read `true` because the inline bootloader runs in `<head>`
- long before the parser reaches `<script src="theme.js">`.
-- Letting the inline bootloader's resolution logic drift from
- `theme.js`'s `applyTheme(currentTheme())` (e.g., adding a new
- `'high-contrast'` mode to theme.js without mirroring in the
- bootloader, or vice versa) → the first paint resolves to one
- mode, theme.js's boot-time call resolves to a different mode,
- the user sees a flicker on every navigation. The bootloader is
- the read-only mirror of `applyTheme()`'s resolution rule — same
- `THEME_KEY` ('sbpp-theme'), same default ('system'), same
- dark-resolution predicate. The bootloader's only difference is
- it doesn't `localStorage.setItem(...)` (theme.js still owns
- persistence). Any change to theme.js's resolution logic has
- to land a paired bootloader update in the same PR.
+- Removing the inline anti-FOUC bootloader from `<head>` of any
+ of the five template surfaces that carry it —
+ `web/themes/default/core/header.tpl` (the panel chrome, #1367),
+ `web/themes/default/page_kickit.tpl`,
+ `web/themes/default/page_blockit.tpl` (the iframe-routed
+ surfaces, #1438), `web/themes/default/page_uploadfile.tpl` (the
+ upload popup window, #1438 follow-up), or
+ `web/themes/default/updater.tpl` (the standalone updater wizard,
+ #1438 follow-up) — "theme.js already does this on boot, why
+ does it have to be inline?" → theme.js loads from
+ `core/footer.tpl` (the document tail) and runs AFTER the parser
+ reaches `</body>`. By that point the browser has already painted
+ the entire body in light mode (the `:root` tokens default to
+ light), and theme.js's class flip triggers a full repaint the
+ user perceives as a white flash + content flicker on every page
+ navigation (#1367 — the reporter's exact symptom on the chrome:
+ "the page briefly renders in light mode for a split second
+ before switching back to dark"). For the chromeless surfaces
+ (the four #1438 templates) the bug is worse: those templates
+ DON'T load `theme.js` at all (the iframes pull
+ `api-contract.js` / `sb.js` / `api.js`, the upload popup pulls
+ nothing JS-side, the updater pulls nothing JS-side), so without
+ the bootloader there is NO theme-resolution path whatsoever and
+ the page paints stark white forever (#1438 — reporter's symptom:
+ dark-mode operator right-clicks a player → "Kick player" →
+ navigates to a stark-white full-page kickit document; the same
+ stark-white-over-dark-parent regression hits the upload popup
+ chrome and the post-upgrade updater landing page). The
+ bootloader is the inline-script-in-`<head>` pattern every modern
+ theme-toggle implementation uses (Tailwind docs, Next.js docs,
+ GitHub, Vercel) — it has to run BEFORE the body parses, which
+ means it has to be inline (no external `<script src=…>` because
+ the network round-trip would defeat the point) and it has to be
+ in `<head>` (so the parser reaches it before the body tags).
+ Regression guards: `web/tests/e2e/specs/flows/theme-fouc.spec.ts`
+ (chrome — uses `page.route` to stall the `theme.js` network
+ request, then asserts the `dark` class is present or absent on
+ `<html>` WHILE theme.js is held; pre-#1367 the dark / system
+ arms read `false`, post-fix they read `true`) plus
+ `web/tests/e2e/specs/flows/iframe-anti-fouc.spec.ts` (#1438 —
+ simpler shape because none of the chromeless templates load
+ `theme.js`, so a plain `page.goto(URL)` + `toHaveClass(/dark/)`
+ is sufficient; covers kickit + blockit + uploadfile with dark /
+ light / system+OS-dark / system+OS-light branches) plus
+ `web/tests/integration/IframeChromeAntiFoucBootloaderTest.php`
+ (#1438 — static-grep gate asserting every required bootloader
+ fragment appears in all five template files (`core/header.tpl`,
+ `page_kickit.tpl`, `page_blockit.tpl`, `page_uploadfile.tpl`,
+ `updater.tpl`), the bootloader precedes `<link rel="stylesheet">`
+ in each, the bootloader bodies are byte-equivalent across the
+ five copies after whitespace normalization, and NO install-wizard
+ `.tpl` carries the bootloader; catches drift edits that update
+ one bootloader copy and forget the others).
+- Letting the inline bootloader's resolution logic drift between
+ any two of the five copies (`core/header.tpl`, `page_kickit.tpl`,
+ `page_blockit.tpl`, `page_uploadfile.tpl`, `updater.tpl`) OR
+ between any copy and `theme.js`'s `applyTheme(currentTheme())`
+ (e.g., adding a new `'high-contrast'` mode to theme.js without
+ mirroring in any of the bootloaders, or mirroring in four but
+ forgetting the fifth) → the first paint resolves to one mode on
+ Surface A, a different mode on Surface B, and theme.js's
+ boot-time call (where it runs at all) resolves to yet another
+ mode; the user sees flicker on every navigation even with all
+ five bootloaders present, AND a sibling pair of pages renders
+ mismatched themes (e.g. operator on a dark-mode panel opens the
+ upload popup which paints light because its bootloader missed the
+ update). The bootloader is the read-only mirror of `applyTheme()`'s
+ resolution rule — same `THEME_KEY` ('sbpp-theme'), same default
+ ('system'), same dark-resolution predicate. The bootloader's only
+ differences are: (1) it doesn't `localStorage.setItem(...)`
+ (theme.js still owns persistence); (2) it adds a defensive
+ `window.matchMedia &&` null check before calling `matchMedia(...)`
+ (handles very old browsers without the API gracefully); (3) the
+ outer `try/catch` swallows BOTH `localStorage` errors (private-mode
+ SecurityError) and `matchMedia` errors. These three differences
+ are intentional defensiveness — they don't change the resolution
+ result for any reachable input shape; they prevent the bootloader
+ from throwing in environments where theme.js itself would
+ partially fail too. Any change to theme.js's resolution logic
+ has to land a paired bootloader update in all five template
+ copies in the same PR. The integration test
+ (`IframeChromeAntiFoucBootloaderTest`) enforces byte-equivalence
+ across all five bootloader bodies (whitespace-normalized) AND
+ fragment-presence against a list shared with `core/header.tpl`,
+ so a drift between any pair fails the build.
 - Moving the bootloader to an external `<script src="…">` ("inline
  scripts are smelly, let's externalize") → an external script adds
  a network round-trip BEFORE the bootloader can run, and the
@@ -2659,6 +3553,29 @@ contacting every contributor individually.
 - `xajax` / `sb-callback.php` → use the JSON API.
 - ADOdb → use `Sbpp\Db\Database` (PDO; legacy `Database` alias still
   resolves via `class_alias`).
+- Branching the response envelope on a per-account signal in a public
+  auth surface (`throw new ApiError('not_registered', …)` on the
+  password-reset miss branch, `throw new ApiError('mail_failed', …)`
+  on the SMTP-failure branch, "an email has been sent to <user>" on
+  the success branch vs. "no account found" on the miss branch in
+  the painted toast) → use `_api_auth_lost_password_generic_response`-
+  shape helpers that return the SAME envelope across every reachable
+  branch. The pre-#1456 shape on `api_auth_lost_password` let an
+  unauthenticated visitor enumerate every registered admin email by
+  posting one address per request and reading the painted toast
+  title back ("Check E-Mail" → registered; "Error" + "not
+  registered" → unregistered). The post-fix contract is documented
+  under "Public auth surfaces: response-shape uniformity" in
+  Conventions; new public auth surfaces fall under the same rule
+  from day one. The orphaned snapshots
+  (`web/tests/api/__snapshots__/auth/lost_password_not_registered.json`
+  and `lost_password_mail_failed.json`) were deleted at #1456 — do
+  not re-add them; if a future change needs a non-generic snapshot
+  on this surface, the contract has regressed. Closes the
+  user-visible channel; the response-time differential between the
+  matched (SMTP round-trip) and missed (immediate return) branches
+  is documented as a residual risk requiring a separate (background-
+  worker / pad-the-miss) follow-up.
 - MooTools / React / a runtime bundler → vanilla JS in `web/scripts/`.
 - `web/scripts/sourcebans.js` (the v1.x ~1.7k-line bulk file shipping
   `ShowBox`, `DoLogin`, `LoadServerHost`, `selectLengthTypeReason`, …)
@@ -2769,7 +3686,7 @@ contacting every contributor individually.
   comes up empty because the read-the-message-first contract
   was burned through routine overuse). The contract:
   - **Default** (no 5th arg): chrome's `SHOWTOAST_DEFAULT_DURATION`
-    (~4000ms). The right choice for every routine path.
+    (~6000ms post-#1444). The right choice for every routine path.
   - `0`: severe-error branches ONLY. The five NOT-* sites today
     are the entire set; adding a sixth requires the same
     "destructive operation failed mid-flight, audit log already
@@ -2785,16 +3702,26 @@ contacting every contributor individually.
   / `testNotStarBranchesPassPersistentDurationMs` plus the
   `toast-persistent-duration.spec.ts` E2E that asserts the
   NOT-* toast survives past `SHOWTOAST_DEFAULT_DURATION`.
-- Mirroring the literal `4000` into a new caller or test
-  ("the default is 4 seconds, let me hard-code it") → the
+- Mirroring the literal `6000` into a new caller or test
+  ("the default is 6 seconds, let me hard-code it") → the
   default lives in `theme.js`'s `SHOWTOAST_DEFAULT_DURATION`
   constant — single source. Reference it as `null` on the
   PHP side (`Toast::emit(...)` with no 5th arg) and trust the
-  chrome to fill in the value. The 4000ms number is one
-  reduce-this-to-3000ms tweak away from desynchronising every
-  hard-coded mirror; the chrome's constant + omission-on-wire
-  is what keeps the contract single-source. The matching
-  consumer-side gate
+  chrome to fill in the value. On the JS-test side, read it
+  at runtime from `window.SBPP.SHOWTOAST_DEFAULT_DURATION`
+  (exposed for exactly this lockstep purpose, #1444 review
+  M-2) — derive every wait threshold from the read value
+  instead of hardcoding `6500` or `5500` or other literal-
+  derived numbers. Hardcoded mirrors silently pass for the
+  wrong reason when the constant moves: a `await
+  page.waitForTimeout(5500)` followed by "still visible"
+  passes whether the default is 6000ms OR 8000ms, because
+  5500ms is inside both windows. The 6000ms number is one
+  reduce-this-to-4000ms tweak away from desynchronising
+  every hard-coded mirror (and the bump from 4000 to 6000
+  in #1444 is itself evidence that the constant moves over
+  time); the chrome's constant + omission-on-wire +
+  runtime-exposure is what keeps the contract single-source. The matching consumer-side gate
   (`if (typeof data.duration_ms === 'number') opts.durationMs = data.duration_ms;`)
   is what makes "field absent → use default" work — a future
   refactor that always serialises `duration_ms` (even when
@@ -2998,18 +3925,37 @@ contacting every contributor individually.
   (`?p=admin&c=bans&section=add-ban&steam=…&type=0` /
   `?p=admin&c=comms&steam=…&type=0`) so the operator lands on the
   real form with the SteamID pre-populated; Kick is the one
-  remaining iframe-routed item (`pages/admin.kickit.php`) because
-  it's a one-shot RCON command with no persistent panel surface
-  to anchor on (#1395 unified Block onto the panel route — pre-fix
+  remaining iframe-routed item (`pages/admin.kickit.php?check=…&type=0&mode=kick`)
+  because it's a one-shot RCON command with no persistent panel
+  surface to anchor on (#1395 unified Block onto the panel route — pre-fix
   it went to the same iframe surface as Kick which was actually the
   post-`Actions.CommsAdd` rcon fan-out target, NOT a stand-alone
   operator page; hitting it directly rendered chromeless and POSTed
-  to a 404). The anti-pattern that stays anti is the MooTools-era
-  plumbing — `sb.contextMenu`, `AddContextMenu`, the global helpers,
-  the separate `contextMenoo.js` file. Reach for the documented
-  data-attribute hooks instead. Don't reintroduce the help text
-  without the wiring (`page_servers.tpl`'s hint copy is now gated
-  on `$can_use_context_menu` so anonymous viewers don't see it).
+  to a 404). The `&mode=kick` qualifier on the Kick URL is the
+  #1439 contract: `pages/admin.kickit.php` reads `$_GET['mode']`,
+  allowlists it to `'ban'` (default; the post-ban iframe embed
+  inside `admin.bans.php`'s "Ban Added" success dialog never
+  supplies the param) or `'kick'` (this context-menu flow), and
+  the kickit iframe template + the `api_kickit_kick_player`
+  handler branch on the value: the page title swaps between
+  "Kick player" and "Ban player", the iframe's post-completion
+  redirect lands on `?p=servers` (kick mode) vs `?p=admin&c=bans`
+  (ban mode), the handler skips the `:prefix_bans` UPDATE that's
+  only meaningful when a ban row exists, and the rcon kick message
+  swaps between "You have been kicked from this server" (kick)
+  and "You have been banned by this server, check $domain for
+  more info" (ban). The pre-#1439 shape (no `mode` param) always
+  ran the ban-completion code path, which on the kick-only flow
+  surfaced the wrong "you have been banned" message to the kicked
+  player and (worse) updated whatever ban row happened to share
+  the SteamID with the kicked player — silently mutating
+  unrelated admin state. The anti-pattern that stays anti is the
+  MooTools-era plumbing — `sb.contextMenu`, `AddContextMenu`, the
+  global helpers, the separate `contextMenoo.js` file. Reach for
+  the documented data-attribute hooks instead. Don't reintroduce
+  the help text without the wiring (`page_servers.tpl`'s hint
+  copy is now gated on `$can_use_context_menu` so anonymous
+  viewers don't see it).
 - `web/install/scripts/sourcebans.js` + `web/install/template/*.php`
   procedural-PHP-template wizard (the v1.x install surface that
   rendered through `header.php` + `page.<N>.php` + `footer.php`,
@@ -3095,6 +4041,46 @@ contacting every contributor individually.
   back to the raw message for unrecognised codes so debugging
   stays possible. Anti-pattern: surfacing `$e->getMessage()`
   directly to operator-facing error banners.
+- Adding a `<FilesMatch>` regex pattern in
+  `docker/apache/sbpp-prod.conf` whose alternation matches a
+  basename shared by a published browser asset → removed at
+  #1419. Pre-fix the union carried `api-contract\..*` (intended
+  to shield some never-existed `api-contract.*` config artifact
+  at the panel root). `<FilesMatch>` matches the **basename**
+  regardless of which directory the URL resolves under, so the
+  regex also denied the published `web/scripts/api-contract.js`
+  — the chrome JS `core/header.tpl` loads on every page render
+  to define the `Actions.*` / `Perms.*` namespaces every
+  `sb.api.call(Actions.PascalName, …)` site depends on. The
+  panel-runtime symptom under the production Docker image:
+  password login spins forever (the form's submit handler
+  `e.preventDefault()`s and `setBusy(submitBtn, true)` BEFORE
+  `sb.api.call(Actions.AuthLogin, …)` fires; with `Actions`
+  undefined the call throws and neither `.then` branch ever
+  releases the spinner), and every panel chrome action button
+  that drives a JSON action (Notes pane, ban/comm unblock,
+  admin/mod delete, group-ban dispatcher, server refresh, …)
+  is dead-on-arrival. Steam login is unaffected because the
+  OpenID round-trip is server-side redirects with no JS
+  dependency on `Actions.*` — exactly the asymmetry the bug
+  reporter saw. **The bug only surfaces under
+  `docker/Dockerfile.prod` →
+  `ghcr.io/sbpp/sourcebans-pp:*`** (the dev compose stack
+  uses a different Apache config; tarball installs don't
+  ship Apache at all). When extending the deny list, prefer
+  `<Files "exact-name">` for root-only configs that have a
+  unique basename, or a path-anchored
+  `<LocationMatch "^/exact-path$">` block when the basename
+  could collide with a published asset. Regression guard:
+  `web/tests/integration/ProdApacheConfigTest.php` runs every
+  extracted `<FilesMatch>` regex (and every `<Files>`
+  exact-name) against every published basename under
+  `web/scripts/` and `web/themes/default/js/` — a match
+  anywhere fails the build. The local `./sbpp.sh test`
+  runner stays symmetric with CI because
+  `docker-compose.yml` bind-mounts `./docker:/var/www/html/docker:ro`
+  so the test can read the conf from inside the dev
+  container.
 - `openTab()` JS (and the matching `<button onclick="openTab(...)">`
   chrome on `core/admin_tabs.tpl`) → the JS handler was dropped with
   sourcebans.js at #1123 D1; the buttons did nothing and every pane
@@ -3361,37 +4347,43 @@ contacting every contributor individually.
   + `BansTest.php` + `AdminsTest.php` (the
   `"STEAM_0:0:1\n"` / `"[U:1:1]\n"` / `"76561197960265728\n"`
   cases pin the wire-side behavior).
-- Storing the operator-typed Steam ID in `:prefix_bans.authid`
-  on an IP-type ban (the `82e8c3d2` "canonicalise valid IDs on
-  IP-type bans to match pre-tighter behaviour" nit shape) → the
-  `:authid` column is the *steam id* of the banned player. On
-  an IP-type ban (`BanType::Ip = 1`) there is no steam id, by
-  definition; the canonical "no steam id" value is the schema's
-  `NOT NULL default ''` empty string. The `82e8c3d2` nit aimed
-  to preserve "pre-tightening behavior" for the case where the
-  operator typed a valid-looking SteamID into the form's
-  Steam ID box and then flipped the type radio to "IP-type" —
-  pre-tightening the unconditional `toSteam2($rawSteam)` would
-  have stored the canonicalised value in `:authid` AND the
-  unconditional run would have raised on `garbage` and 500'd
-  the page. The nit canonicalised the valid case (good
-  intention) but didn't suppress the storage path (the bug it
-  carried), AND failed to defend the invalid-input branch on
-  the IP-type arm (the 500 was still reachable via
-  `?type=1&steam=garbage`). The right shape is: hard-code
-  `$_POST['steam'] = ''` for `$banType === BanType::Ip` and
-  let the operator's form input remain visible only as
-  client-side echo (template `placeholder`, NOT a stale value).
-  Matches the `api_bans_add` write-side fix in the same PR
-  (`$steam = $banType === BanType::Ip ? '' : ...`). The
-  asymmetry pre-#1423-follow-up-#4 (page handler stored
-  canonicalised, JSON handler stored empty) was its own bug
-  class — third-party callers POSTing to the iframe-routed
-  page handler vs. the JSON dispatcher produced inconsistent
-  DB state for the same logical input. Regression guard:
-  `web/tests/api/BansTest.php::testAddIpTypeAlwaysWritesEmptyAuthid`
-  (valid Steam input + garbage + newline-bypass all write
-  empty `authid` on `type=1`).
+- Storing an UNVALIDATED operator-typed Steam ID in
+  `:prefix_bans.authid` on an IP-type ban → as of #1486 an IP-type
+  ban DOES keep a Steam ID-of-record when the operator fills both
+  fields (the schema has always had separate `ip` + `authid`
+  columns; enforcement stays IP-only because the SourceMod plugin
+  matches an IP ban on the `ip` column alone, so the stored authid
+  is inert plugin-side and exists only so the ban detail / banlist
+  can show which account the IP belonged to). What stays forbidden
+  is storing it WITHOUT the shape gate: the value MUST pass
+  `SteamID::isValidID()` (page handler) / `HANDLER_STRICT_REGEX`
+  (JSON handler) BEFORE `toSteam2()`, exactly like the Steam-type
+  branch. Skipping the gate re-opens two bug classes — (a) a junk
+  value (`?type=1&steam=garbage`) escapes `toSteam2()` as
+  `Exception('Invalid SteamID input!')` → 500 (the #1420 / #1423
+  follow-up #4 class), and (b) a malformed authid lands on disk and
+  the drawer / banlist later derive a synthetic `community_id`
+  (`STEAM_0:0:0`) off it (#1486's display bug). The right shape is
+  the validate-then-convert ladder: empty Steam ID → write `''`
+  (nothing recorded); non-empty → shape-gate → `toSteam2()` → store;
+  bad shape → `validation` envelope (JSON) / `$validationErrors['steam']`
+  bounce with raw input preserved (page handler). Both surfaces
+  (`api_bans_add` + `admin.edit.ban.php`) share the ladder so the
+  JSON dispatcher and the iframe-routed page handler can't diverge
+  on the same logical input. The pre-#1486 shape hard-cleared
+  `authid` for `type=1`, silently dropping a SteamID the operator
+  deliberately typed; the older `82e8c3d2` "canonicalise on IP-type"
+  nit stored a *canonicalised* value but failed to suppress the
+  raw-on-invalid path — both are superseded by the gated keep.
+  Regression guard:
+  `web/tests/api/BansTest.php::testAddIpTypeKeepsValidatedSteamOfRecord`
+  (valid Steam input kept alongside the IP, empty input writes
+  empty `authid`, garbage + non-trimmable malformed shapes — mid-string
+  `\n` — rejected with a `validation` envelope on the `steam` field
+  before any row is written, trailing-newline trims to a valid value
+  and is kept) +
+  `web/tests/integration/SteamIDValidationOrderTest.php` (pins the
+  validate-before-convert order in `admin.edit.ban.php`).
 - Calling `SteamID::compare($a, $b)` (or any other
   `SteamID::*` method that funnels through `toSteam64()` /
   `resolveInputID()`) with operator-controlled input that
@@ -3450,10 +4442,22 @@ contacting every contributor individually.
   pane shape from `page_admin_settings_settings.tpl` (calls
   `system.preview_intro_text`, server-renders through `IntroRenderer`).
 - Ad-hoc per-page empty-state copy → use the shared `.empty-state`
-  layout + the first-run-vs-filtered split documented under
-  "Empty states" above. Inconsistent voice and missing CTAs are what
-  #1207's empty-state audit caught; future surfaces stay on the
-  unified pattern.
+ layout + the first-run-vs-filtered split documented under
+ "Empty states" above. Inconsistent voice and missing CTAs are what
+ #1207's empty-state audit caught; future surfaces stay on the
+ unified pattern.
+- Emdash (`—`) in user-facing text (panel `.tpl`, page-handler
+ `Toast::emit` strings, docs `.md` / `.mdx` prose) → split the
+ sentence, swap to parentheses, or delete the clause. Per
+ "User-facing text style" above. Hyphen / en-dash are fine; the
+ emdash specifically reads as filler and is hard to type. The rule
+ does NOT apply to contributor docs (`AGENTS.md`, `ARCHITECTURE.md`,
+ etc.) or code comments.
+- Verbose user-facing copy that explains the system to the operator
+ ("As you can see…", "Please note that…", "It's worth mentioning…",
+ multi-paragraph rationale before the action) → say what to do,
+ skip the why unless the why changes the action. One thought per
+ sentence. Per "User-facing text style" above.
 - Markdown-rendering admin display text client-side → use the
   server-side `system.preview_intro_text` action (same `IntroRenderer`
   the public dashboard uses). A bundled JS Markdown library would
@@ -3605,6 +4609,81 @@ contacting every contributor individually.
   every keyboard / screen-reader user. New surfaces add visible
   buttons in the same shape as `.queue-row` (admin moderation
   queue) or the comms-list desktop table (`web/themes/default/page_comms.tpl`).
+- Row-wide `cursor: pointer` on the bare `.table tbody tr` (or any
+  other `tbody tr` / `tbody > tr` / `.table tr` / `tr.ban-row` /
+  `tr[data-testid="ban-row"]` / `tr[data-testid="comm-row"]` /
+  `[role="row"]` selector that lands the cursor on a row scope) →
+  the `<tr>` element is NOT a click target on the bans list, the
+  comms list, the admin admins / mods / groups / overrides /
+  servers tables, the kickit / blockit iframes, the bans-groups
+  list, or admin-edit-group / admin-edit-admins-perms. The v2.0
+  chrome on those surfaces delegates interaction to specific
+  *child* elements: the player-name `<a>` carries
+  `[data-drawer-bid]` / `[data-drawer-cid]` / `[data-drawer-href]`
+  for the drawer; row-action buttons carry `data-action="…"` for
+  delete / unban / unmute / re-apply / copy; the per-row comments
+  toggle via its native `<summary>`. The row itself has no click
+  handler. Painting `cursor: pointer` on the row falsely
+  advertised every pixel as clickable, so users would click on
+  dead cells (steam id, IP, reason, status, server, admin,
+  length, banned timestamp) and nothing would happen — the
+  reporter's exact symptom on #1443. The fix dropped the
+  declaration from the bare `.table tbody tr` rule
+  (`web/themes/default/css/theme.css`); native cursors on the
+  inner `<a>` / `<button>` / `<summary>` elements already paint
+  correctly without help, so removing the row-wide declaration
+  restored honest affordance ("pointer only where clicking does
+  something"). The hover-background rule
+  (`.table tbody tr:hover { background: var(--bg-muted); }`) is
+  intentionally retained — it's a scanning aid for tracking which
+  row the mouse is on, not a clickability claim, mirroring the
+  Linear / Notion / GitHub / Vercel data-table convention of
+  hover-bg-without-pointer-cursor.
+
+  **The one in-tree surface where the `<tr>` IS the click target**
+  is the System Log table (`web/themes/default/page_admin_settings_logs.tpl`).
+  Each row carries `onclick="toggleLogRow(this)"` that flips a
+  sibling detail row's `hidden` attribute (the template's
+  `<p>Click a row to expand.</p>` instruction makes the
+  affordance contract explicit). For that case — and any future
+  surface that genuinely wires a row-wide click handler — the
+  opt-in `.table.table--clickable-rows tbody tr { cursor: pointer; }`
+  modifier in `theme.css` is the documented escape hatch. Apply
+  it to the `<table>` element (NOT individual `<tr>`s) so it
+  composes cleanly with the column-tier classes
+  (`.col-tier-2` / `.col-tier-3`) and any future table-scoped
+  variant. The System Log row ALSO carries `role="button"` +
+  `tabindex="0"` + `aria-expanded` + an `onkeydown` handler that
+  dispatches Enter / Space to the same toggle path — bare
+  `<tr onclick>` chrome with no role / tabindex / key handling
+  is a sibling anti-pattern (the affordance becomes mouse-only,
+  excluding keyboard and AT users).
+
+  Regression guards:
+  `web/tests/integration/TableRowCursorPointerRegressionTest.php`
+  pins five contracts — (1) the bare `.table tbody tr` rule
+  carries no `cursor: pointer`, (2) the hover-bg rule survives,
+  (3) the `.table.table--clickable-rows tbody tr` opt-in rule
+  exists and DOES carry `cursor: pointer`, (4) no OTHER selector
+  silently re-applies `cursor: pointer` to any table-row scope
+  (the "fail closed" arm catches a future copy-paste from a
+  tooltip / popover demo, a search-and-replace mishap, or a
+  well-meaning "rows feel clickable, let me make them clickable"
+  PR — covers bare `tr`, `tbody > tr` child combinator, attribute
+  selectors, ARIA `[role="row"]`), and (5) the System Log
+  template sets the opt-in class on its `<table>` AND its rows
+  carry the keyboard a11y triple (`role="button"` + `tabindex="0"`
+  + `onkeydown` Enter/Space handler) so the regression that
+  motivated the opt-in pattern stays caught end-to-end. If a
+  future list page genuinely needs row-wide click delegation,
+  set `class="table table--clickable-rows"` on the `<table>` AND
+  wire a real `<tr>`-level click handler AND ship the same
+  keyboard a11y triple AND update the regression test's
+  allowlist with the new opt-in variant — never restore the bare
+  `.table tbody tr { cursor: pointer; }` shape (it would lie on
+  every other table on the panel) and never ship a row-wide
+  `onclick` without `role="button"` + `tabindex="0"` + `onkeydown`
+  (it would exclude keyboard users from the affordance).
 - Viewport-based `@media` queries for hiding `.table` columns
   (`@media (max-width: 1535px) { .col-tier-2 { display: none; } }`
   shape) → use `@container tablescroll (max-width: …)` rules
@@ -3838,47 +4917,56 @@ contacting every contributor individually.
 | Edit a docs page or add a new one (the Astro + Starlight site published at sbpp.github.io) | `docs/src/content/docs/<group>/<slug>.md` (or `.mdx` when the page uses tabs / cards / asides — e.g. `getting-started/quickstart.mdx`, `setup/mariadb.mdx`). New pages also need a sidebar entry in `docs/astro.config.mjs` (the `sidebar:` array). Site config + theme tokens live in `docs/astro.config.mjs` + `docs/src/styles/sbpp.css`. The Starlight chrome ships from `@astrojs/starlight`; layout overrides land under `docs/src/components/` (see `ThemeProvider.astro` for the canonical override shape). Local dev: `cd docs && npm install && npm run dev`. CI gates: `.github/workflows/docs-build.yml` (per-PR build), `docs-deploy-trigger.yml` (main → repository_dispatch into sbpp.github.io), `docs-screenshots.yml` (gated on the `affects-ui` label, runs `docs/scripts/capture.mjs`). Source of truth is here; sbpp.github.io is the deploy shell only (#1333). |
 | Refresh installer / panel screenshots used in docs pages | `docs/scripts/capture.mjs` (Playwright; `npm run capture` in `docs/`). Output lands under `docs/src/assets/auto/{install,panel}/<stable-slug>.png` so docs pages keep referencing the same path across runs. CI does this automatically on PRs labelled `affects-ui`; locally run after `./sbpp.sh up`. STEAM_API_KEY is the all-zero dummy `00000000000000000000000000000000`. |
 | Add a JSON action                      | `web/api/handlers/_register.php` + `web/api/handlers/<topic>.php` |
+| Add or audit a publicly-reachable, unauthenticated auth surface (anything in `web/api/handlers/auth.php` or sibling registered as `requireAuth: false`) without leaking per-account state | The reference shape is `api_auth_lost_password` + `_api_auth_lost_password_generic_response` in `web/api/handlers/auth.php` (#1456). All reachable branches MUST return the same envelope; operator-side toggles (e.g. `config.enablenormallogin`) MAY surface as a per-toggle error code because the value is the same for every caller. The pre-#1456 shape branched on `not_registered` / `mail_failed` and let an unauthenticated visitor enumerate registered admin emails one request at a time by reading the painted toast back. See "Public auth surfaces: response-shape uniformity" in Conventions for the full contract (audit-log discipline, DB-write gating, SMTP gating, the documented response-time residual risk) + the matching Anti-patterns entry. Regression guards: `web/tests/api/AuthTest.php::testLostPasswordResponseIsIdenticalForKnownAndUnknownEmail` (byte-for-byte wire assertion) + `web/tests/api/__snapshots__/auth/lost_password_generic.json` (locked envelope) + `web/tests/e2e/specs/flows/lostpassword-toast.spec.ts` (chrome-side parity: same painted toast for known + unknown emails). Sibling surfaces still subject to follow-up (documented under the convention): `api_auth_login` branches its `Api::redirect()` target on per-account state via `?m=…` flags. |
 | Resolve / override the JSON-API endpoint URL the client-side `sb.api.call(...)` POSTs to | `web/scripts/api.js` (`resolveEndpoint()` — runs once at script-load, computes `new URL('../api.php', document.currentScript.src).href`). The script lives at `/scripts/api.js` regardless of which page loads it, so resolving `../api.php` against the script's own URL lands on the panel-root `/api.php` for top-level page renders, iframe-routed surfaces (`pages/admin.kickit.php` / `pages/admin.blockit.php`), AND subdir installs (`https://host/sourcebans/` → script at `…/scripts/api.js` → endpoint at `…/api.php`). The endpoint stays writable on `sb.api` so callers can swap it; do not edit the resolver to a bare `'./api.php'` literal — that's the pre-#1433 regression shape that 404s every iframe round-trip (`./api.php` resolves against the iframe's document URL `/pages/admin.kickit.php` → `/pages/api.php`, no such route). **Load via static `<script src="…">` only** — `document.currentScript` is `null` when the script is appended programmatically (`document.createElement('script')`, `<script>document.write(...)</script>`, async loaders, ES-module `import()`), and a null `currentScript` collapses `SCRIPT_SRC` to the empty string and silently falls back to the bare-relative `./api.php` — i.e. the exact pre-#1433 bug. The three static load sites in the default theme are `core/header.tpl` (top-level panel chrome → `./scripts/api.js`), `page_kickit.tpl`, and `page_blockit.tpl` (iframe surfaces → `../scripts/api.js`); a theme fork that wants to lazy-load needs its own paired endpoint resolver. Pinned by `web/tests/integration/ApiJsEndpointResolutionTest.php` (static) + `web/tests/e2e/specs/flows/kickit-iframe.spec.ts` (runtime). |
+| Stamp `SB_VERSION` / `MAJOR_REVISION` before compiling SourceMod plugins | `game/addons/sourcemod/scripting/scripts/resolve-plugin-version.sh` → `include/sbpp_version.inc` (included from `sourcebanspp.inc` + `sbpp_checker.sp`). Tiers: `SBPP_RELEASE_VERSION` (release tag in `release.yml`) → `web/configs/version.json` → `git describe` → `dev`. Checked-in `sbpp_version.inc` is the direct-compile fallback. Regression: `web/tests/integration/PluginVersionResolveTest.php`. |
 | Validate a server-address input (IPv4 / IPv6 / hostname) on either Add-Server (`api_servers_add`) or Edit-Server (`admin.edit.server.php`) | Shared validator pattern: `filter_var($x, FILTER_VALIDATE_IP) \|\| filter_var($x, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME)`. Both surfaces MUST share the same predicate so a value either round-trips through Add AND Edit or fails on both (#1433); pre-fix the JSON dispatcher ran IP-only while the page handler ran a too-loose hand-rolled `^[a-zA-Z0-9.\-]+$` regex. The matching schema-width gate (`strlen($x) > 64`, surfacing as `validation` envelope or `$validationErrors['address']`) is paired with the IP/hostname check because `:prefix_servers.ip` is `VARCHAR(64) NOT NULL` (see `web/install/includes/sql/struc.sql`) — well below RFC 1035's 253-char hostname max, and MariaDB strict mode would otherwise raise `SQLSTATE[22001] 1406 Data too long for column 'ip'` mid-INSERT (generic 500 + no audit-log entry). Bumping the column to `VARCHAR(255)` is a paired schema-migration follow-up. Pinned by `web/tests/api/ServersTest.php::testAddAcceptsHostname` / `testAddAcceptsFqdn` / `testAddAcceptsBareIPv6` / `testAddRejectsAddressExceedingSchemaWidth` / `testAddRefusesDuplicateHostnamePort` / `testAddRejectsWhitespaceInAddress`. |
 | Add or rename a permission             | `web/configs/permissions/web.json`, then regen contract  |
 | Render a page                          | `web/pages/<page>.php` + `web/includes/View/*View.php`   |
-| Add a new edit page in the admin.edit.* cluster (e.g. `admin.edit.<x>.php`) | `web/pages/admin.edit.<x>.php` (the page handler — thin "validate input, build View, render" shape) + `web/includes/View/AdminEdit<X>View.php` (typed View DTO) + `web/themes/default/page_admin_edit_<x>.tpl` (template). Shared helpers live in `web/pages/_admin_edit_helpers.php` (`sbpp_admin_edit_die_with_toast()` for permission / not-found guards, `sbpp_admin_edit_emit_tail_script()` for form-success / validation-error feedback that fires `window.SBPP.showToast()` and writes errors into `<id>.msg` divs, `sbpp_admin_edit_collect_rehash_sids()` for the post-save Rehash Admins step). Anti-patterns to avoid: inline `echo '<form>...'` blocks, `echo '<div id="msg-red">…'` banners, MooTools `$('id').value` reads, legacy JS handler names (`ButtonOver`, `ProcessEditAdminPermissions`, etc.) — all swept as part of `goals#5`. CSRF gate every POST via `\CSRF::rejectIfInvalid();` after the `isset($_POST['<sentinel>'])` arm. |
+| Add a new edit page in the admin.edit.* cluster (e.g. `admin.edit.<x>.php`) | `web/pages/admin.edit.<x>.php` (the page handler — thin "validate input, build View, render" shape) + `web/includes/View/AdminEdit<X>View.php` (typed View DTO) + `web/themes/default/page_admin_edit_<x>.tpl` (template). Shared helpers live in `web/pages/_admin_edit_helpers.php` (`sbpp_admin_edit_die_with_toast()` for permission / not-found guards, `sbpp_admin_edit_emit_tail_script()` for form-success / validation-error feedback that fires `window.SBPP.showToast()` and writes errors into `<id>.msg` divs, `sbpp_admin_edit_collect_rehash_sids()` for the post-save Rehash Admins step). Anti-patterns to avoid: inline `echo '<form>...'` blocks, `echo '<div id="msg-red">…'` banners, MooTools `$('id').value` reads, legacy JS handler names (`ButtonOver`, `ProcessEditAdminPermissions`, etc.) — all swept as part of the v2.0 rewrite. CSRF gate every POST via `\CSRF::rejectIfInvalid();` after the `isset($_POST['<sentinel>'])` arm. |
 | Wire a `window.opener.<callback>(...)` slot on the parent template of a popup file-upload page (e.g. `window.icon`, `window.demo`, `window.mapimg`) | The parent template defines `window.<callback> = function (filename) { … }` inside an inline `<script>` block (use the `{literal}…{/literal}` Smarty guard so `{` / `}` inside the JS body don't trigger Smarty parsing). The function patches the parent form's hidden input (e.g. `document.getElementById('icon_hid').value = filename;`) and any visible affordances (toggle a thumbnail preview, swap a "Choose file" label for the filename). Reference: `web/themes/default/page_admin_mods_add.tpl` + `page_admin_edit_mod.tpl` for the `window.icon` wiring (#1402), and `web/themes/default/page_admin_bans_add.tpl` / `page_admin_edit_ban.tpl` for the `window.demo` wiring. Without this slot the popup emits `<script>window.opener.icon('foo.jpg')</script>` and the call throws `TypeError: window.opener.icon is not a function` — popup never closes, the parent form's hidden input never updates, the uploaded asset is orphaned on disk. The `UploadHandler` emits the call unconditionally; the parent's job is to be ready for it. |
-| Add a popup file-upload page (demo / icon / mapimage / new asset type) | `Sbpp\Upload\UploadHandler::handle()` (`web/includes/Upload/UploadHandler.php`). The page handler at `web/pages/admin.upload<x>.php` is a thin wrapper passing the per-page knobs (`permission` mask, `field` `$_FILES` key, `allowed` extensions, `destDir`, `callback` JS function name on `window.opener`, `auditOk` / `auditFmt` / `errorMsg` / `title` / `formName` / `formats` strings, optional `renameToHash` for demo-style randomised filenames). The handler runs CSRF + permission check, sanitises `$_FILES[…]['name']` via `sanitiseName()` (basename + strip backslashes + trim leading dots — defends LFI on the icon / mapimage paths where the filename hits disk), `move_uploaded_file()`s to the destination, calls `Log::add(LogType::Message, …)`, and on success emits the `<script>window.opener.<callback>(...)</script>` blob the parent page picks up. The three reference call sites (`admin.uploaddemo.php`, `admin.uploadicon.php`, `admin.uploadmapimg.php`) are 30-line wrappers; new asset types should match that line budget. Anti-pattern: hand-rolling the move / log / popup-emission sequence per page (the pre-`goals#5` shape). |
+| Add a popup file-upload page (demo / icon / mapimage / new asset type) | `Sbpp\Upload\UploadHandler::handle()` (`web/includes/Upload/UploadHandler.php`). The page handler at `web/pages/admin.upload<x>.php` is a thin wrapper passing the per-page knobs (`permission` mask, `field` `$_FILES` key, `allowed` extensions, `destDir`, `callback` JS function name on `window.opener`, `auditOk` / `auditFmt` / `errorMsg` / `title` / `formName` / `formats` strings, optional `renameToHash` for demo-style randomised filenames). The handler runs CSRF + permission check, sanitises `$_FILES[…]['name']` via `sanitiseName()` (basename + strip backslashes + trim leading dots — defends LFI on the icon / mapimage paths where the filename hits disk), `move_uploaded_file()`s to the destination, calls `Log::add(LogType::Message, …)`, and on success emits the `<script>window.opener.<callback>(...)</script>` blob the parent page picks up. The three reference call sites (`admin.uploaddemo.php`, `admin.uploadicon.php`, `admin.uploadmapimg.php`) are 30-line wrappers; new asset types should match that line budget. Anti-pattern: hand-rolling the move / log / popup-emission sequence per page (the pre-v2.0 shape). |
 | Edit a template                        | `web/themes/default/*.tpl`                               |
 | Reuse the moderation-queue card layout (admin submissions / protests, mobile-stacked summary rows) | `web/themes/default/css/theme.css` (`.queue-row`, `.queue-row__body`, `.queue-row__date` — #1207 PUB-2). Apply by adding `class="queue-row …"` to the outer `<details>` and dropping the inline `flex` / `flex-shrink:0` styles from the summary children. |
 | Add visible row actions to a table-rendered admin list (Edit / Unmute / Remove buttons + responsive mobile-card mirror) | `web/themes/default/page_comms.tpl` (#1207 ADM-5) is the canonical reference: `<button class="btn btn--secondary btn--sm">` / `<a class="btn btn--ghost btn--sm">` inside a `.row-actions` cell, plus `.ban-card__actions` row of identical-data-action buttons in the mobile card. Wire destructive / state-changing buttons via `data-action="…"` + `data-bid` + `data-fallback-href`; the inline page-tail JS calls `sb.api.call(Actions.PascalName)` and falls back to the GET URL if the JSON dispatcher is absent. The public banlist (`web/themes/default/page_bans.tpl`) follows the same shape — same chrome (Lucide icon + visible text label inside `.btn--ghost` / `.btn--secondary btn--sm`), same `.ban-card__actions` mobile row, same `data-action` / `data-fallback-href` wiring (`bans-unban` / `bans-delete`). The Remove affordance points at the legacy GET handler (`?p=banlist&a=delete&id=…&key=…` at the top of `page.banlist.php`) because no JSON `bans.delete` action exists yet — the inline JS `confirm()`-prompts then navigates, mirroring commslist's flow without adding a new handler / snapshot / permission-matrix entry. |
 | Wire a comment-delete trash icon on any of the four comment-rendering surfaces (banlist, commslist, admin.bans protests, admin.bans submissions) | `web/scripts/comment-actions.js` (#1402). Single document-level dispatcher loaded from `core/footer.tpl` (`<script src="./scripts/comment-actions.js" defer>`) that picks up every `[data-action="comment-delete"]` click, `window.confirm`s the destructive intent, then `sb.api.call(Actions.BansRemoveComment, { cid, ctype, page })`. The four call sites emit the trigger with `data-cid="<int>"` + `data-ctype="<B|C|S|P>"` + `data-page="<int>"` (the page number for client-side row-hide / paginator-aware redirect; `data-page="-1"` is the sentinel for unpaginated moderation queues). The `ctype` letter matches `:prefix_comments.type` (B=ban, C=comm-block, S=submission, P=protest); `api_bans_remove_comment`'s `ctype` arm consumes all four. Don't duplicate the dispatcher inline per page — the single mount point is the contract, otherwise a future bug-fix has to land in four places. |
 | Add a confirm + reason modal for an irreversible row-level action (unban, lift comm block, delete admin, delete mod, …) | `web/themes/default/page_bans.tpl` (`#bans-unban-dialog`, `Actions.BansUnban`) and `web/themes/default/page_comms.tpl` (`#comms-unblock-dialog`, `Actions.CommsUnblock`) are the canonical reference (#1301), with `web/themes/default/page_admin_admins_list.tpl` (`#admins-delete-dialog`, `Actions.AdminsRemove`, #1352) and `web/themes/default/page_admin_mods_list.tpl` (`#mod-delete-dialog`, `Actions.ModsRemove`, #1397) as the third and fourth references for the optional-reason variant. Shape: a `<dialog hidden>` with a `<form method="dialog">` carrying a `<textarea aria-required="true">` (or `aria-required="false"` for the optional-reason variant — see admins-delete / mod-delete) (NOT the native `required` — that lets the browser block the form submit before our handler runs, swallowing the inline-error UX), a Cancel button, and a Confirm submit button. The page-tail JS opens the dialog via `showModal()` on `[data-action]` clicks, validates the trimmed reason on submit (load-bearing gate is server-side), forwards `ureason` to the JSON action, and on success flips the row in place via the same `flipRowToUnbanned`/`flipRowToUnmuted` helper the legacy single-click flow used (or removes the row outright + decrements the count badge for the admins-delete / mod-delete variants where there's no "now-unbanned" state to render). The legacy GET fallback (`?p=banlist&a=unban&id=…&key=…&ureason=…` / `?p=commslist&a=ungag…&ureason=…`) is the no-JS / hand-edited-URL path; both halves now reject empty `ureason` server-side so the audit log carries the *why*. The admins-delete and mod-delete variants have no legacy GET handler — `RemoveAdmin()` / `RemoveMod()` always went through the JSON dispatcher pre-#1123 D1 — so their `data-fallback-href` lands the operator back at the list page as a graceful no-op when the JSON dispatcher is missing entirely (third-party theme stripping `api.js`); the audit-log "Reason: …" suffix is only emitted when `ureason` is non-empty (vs always-emitted on the bans / comms variants where reason is required). **Do not** put `onclick="event.stopPropagation()"` on the trigger button — `document.addEventListener('click')` is how the dialog opener picks the click up, and stopPropagation would silently swallow it (the action button isn't inside any `[data-drawer-href]` ancestor anyway, so the defensiveness was a copy-paste from the row-name anchor that doesn't apply here). The submit button MUST flip through `setBusy(submitBtn, true)` BEFORE `sb.api.call(...)` leaves the page and clear via `setBusy(submitBtn, false)` on every non-navigating response branch — see "Loading state on action buttons" in Conventions for the contract, the inline-script local wrapper shape, and the regression guard. |
-| Emit a toast from a server-side branch (lostpassword reset success, banlist GET-fallback unban result, admin.edit.* not-found guard, …) | `\Sbpp\View\Toast::emit($kind, $title, $body, ?$redirect, ?$duration_ms)` (`web/includes/View/Toast.php`). Stashes the payload in a `<script type="application/json" class="sbpp-pending-toast">…</script>` block that `theme.js`'s `flushPendingToasts` picks up on `DOMContentLoaded`. Always FQN at call sites (no `use Sbpp\View\Toast;` shim). The chrome JS renders the body through `escapeHtml`; the PHP JSON encoder uses `JSON_HEX_TAG \| JSON_HEX_AMP \| JSON_HEX_APOS \| JSON_HEX_QUOT \| JSON_INVALID_UTF8_SUBSTITUTE \| JSON_THROW_ON_ERROR` so a `</script>` in body cannot break out AND malformed UTF-8 in player names (the #1108 / #765 Latin-1-on-utf8 shape) substitutes to U+FFFD instead of throwing. Multi-toast safe: emit calls stack cleanly; the first non-empty `$redirect` wins (chrome navigates ~1500ms after the toast paints so the user can read it). The optional 5th arg `$duration_ms` (#1409) overrides the chrome's `SHOWTOAST_DEFAULT_DURATION` (~4000ms) — `null` (default) keeps the chrome timing, `0` makes the toast persistent (no auto-dismiss; user must click the X button), `> 0` is an explicit ms override. The 5 NOT-* destructive-action-failed branches in `page.banlist.php` / `page.commslist.php` ("Player NOT Unbanned", "Ban NOT Deleted", "Player NOT UnGagged" × 2, "Ban NOT Deleted") pass `0` so severe-error confirmations don't auto-dismiss before the operator finishes reading. Negative `$duration_ms` throws `\InvalidArgumentException` (Fail closed; see "Duration semantics" in Conventions). Persistent + redirect are mutually exclusive (#1409): pass `null` for `$redirect` when emitting `duration_ms: 0` — the chrome's auto-redirect would otherwise navigate ~1500ms after paint, tearing down the persistent toast before the operator can acknowledge it. The chrome ALSO carries a whole-drain inhibit (`flushPendingToasts` skips the redirect setTimeout entirely when any block had `duration_ms: 0`) as defence-in-depth, but the call-site half (`$redirect=null`) is the primary contract pinned by `testNotStarBranchesPassPersistentDurationMs`'s strict regex (which disambiguates the two `Player NOT UnGagged` sites in `page.commslist.php` by body substring + asserts each site's call shape with `assertSame($expected_count, …)`). Painted ARIA role is kind-aware (#1409 review): `role="alert"` for `kind === 'error'` (assertive — screen readers interrupt to surface), `role="status"` for every other kind (polite). Persistent error toasts especially benefit from `alert` because the screen-reader user is the population least likely to notice a visual change without an auditory cue. Pair with `PageDie()` (or `exit`) whenever the handler's "render the page body" path is no longer meaningful — pre-#1403 the legacy `<script>ShowBox(...)</script>` shape carried its own `window.location` and beat the page render to the user; the lifted helper relies on the explicit redirect + the 1500ms settle. See "Server-side toast emission" in Conventions for the full contract (the "ARIA role contract" subsection covers the kind-aware role rationale). Pinned by `web/tests/integration/ToastEmitRegressionTest.php` (static grep + wire-format + JSON-escape + UTF-8-substitute + FIRST-wins-redirect + `duration_ms` omitted/set/negative/escape contracts + the 5 NOT-* call sites pass `duration_ms: 0` AND `$redirect=null` + call-site contract) and the six marquee E2E specs (`lostpassword-toast.spec.ts`, `protest-toast.spec.ts`, `banlist-getfallback-toast.spec.ts`, `commslist-getfallback-toast.spec.ts`, `admin-edit-comms-toast.spec.ts`, `toast-persistent-duration.spec.ts`). The lostpassword spec seeds the dev stack's mailpit and asserts the password-reset email lands at the right address — the marquee user-reported regression from the audit. The persistent-duration spec (#1409) drives a NOT-* branch payload and asserts the toast is STILL visible past the default ~4000ms window; its sister regression-guard test drives `window.SBPP.showToast(...)` directly (no page-flow / redirect dependency, post-review reshape) and asserts a routine toast auto-dismisses inside the ~4000-5000ms window so a regression bumping or zeroing the default duration fails loudly. |
+| Emit a toast from a server-side branch (lostpassword reset success, banlist GET-fallback unban result, admin.edit.* not-found guard, …) | `\Sbpp\View\Toast::emit($kind, $title, $body, ?$redirect, ?$duration_ms)` (`web/includes/View/Toast.php`). Stashes the payload in a `<script type="application/json" class="sbpp-pending-toast">…</script>` block that `theme.js`'s `flushPendingToasts` picks up on `DOMContentLoaded`. Always FQN at call sites (no `use Sbpp\View\Toast;` shim). The chrome JS renders the body through `escapeHtml`; the PHP JSON encoder uses `JSON_HEX_TAG \| JSON_HEX_AMP \| JSON_HEX_APOS \| JSON_HEX_QUOT \| JSON_INVALID_UTF8_SUBSTITUTE \| JSON_THROW_ON_ERROR` so a `</script>` in body cannot break out AND malformed UTF-8 in player names (the #1108 / #765 Latin-1-on-utf8 shape) substitutes to U+FFFD instead of throwing. Multi-toast safe: emit calls stack cleanly; the first non-empty `$redirect` wins (chrome navigates ~1500ms after the toast paints so the user can read it). The optional 5th arg `$duration_ms` (#1409) overrides the chrome's `SHOWTOAST_DEFAULT_DURATION` (~6000ms post-#1444; was ~4000ms in the v2 RC chrome) — `null` (default) keeps the chrome timing, `0` makes the toast persistent (no auto-dismiss; user must click the X button), `> 0` is an explicit ms override. The 5 NOT-* destructive-action-failed branches in `page.banlist.php` / `page.commslist.php` ("Player NOT Unbanned", "Ban NOT Deleted", "Player NOT UnGagged" × 2, "Ban NOT Deleted") pass `0` so severe-error confirmations don't auto-dismiss before the operator finishes reading. Negative `$duration_ms` throws `\InvalidArgumentException` (Fail closed; see "Duration semantics" in Conventions). Persistent + redirect are mutually exclusive (#1409): pass `null` for `$redirect` when emitting `duration_ms: 0` — the chrome's auto-redirect would otherwise navigate ~1500ms after paint, tearing down the persistent toast before the operator can acknowledge it. The chrome ALSO carries a whole-drain inhibit (`flushPendingToasts` skips the redirect setTimeout entirely when any block had `duration_ms: 0`) as defence-in-depth, but the call-site half (`$redirect=null`) is the primary contract pinned by `testNotStarBranchesPassPersistentDurationMs`'s strict regex (which disambiguates the two `Player NOT UnGagged` sites in `page.commslist.php` by body substring + asserts each site's call shape with `assertSame($expected_count, …)`). Painted ARIA role is kind-aware (#1409 review): `role="alert"` for `kind === 'error'` (assertive — screen readers interrupt to surface), `role="status"` for every other kind (polite). Persistent error toasts especially benefit from `alert` because the screen-reader user is the population least likely to notice a visual change without an auditory cue. Pair with `PageDie()` (or `exit`) whenever the handler's "render the page body" path is no longer meaningful — pre-#1403 the legacy `<script>ShowBox(...)</script>` shape carried its own `window.location` and beat the page render to the user; the lifted helper relies on the explicit redirect + the 1500ms settle. See "Server-side toast emission" in Conventions for the full contract (the "ARIA role contract" subsection covers the kind-aware role rationale). Pinned by `web/tests/integration/ToastEmitRegressionTest.php` (static grep + wire-format + JSON-escape + UTF-8-substitute + FIRST-wins-redirect + `duration_ms` omitted/set/negative/escape contracts + the 5 NOT-* call sites pass `duration_ms: 0` AND `$redirect=null` + call-site contract) and the six marquee E2E specs (`lostpassword-toast.spec.ts`, `protest-toast.spec.ts`, `banlist-getfallback-toast.spec.ts`, `commslist-getfallback-toast.spec.ts`, `admin-edit-comms-toast.spec.ts`, `toast-persistent-duration.spec.ts`). The lostpassword spec seeds the dev stack's mailpit and asserts the password-reset email lands at the right address — the marquee user-reported regression from the audit. The persistent-duration spec (#1409, thresholds updated in #1444) drives a NOT-* branch payload and asserts the toast is STILL visible past the default ~6000ms window; its sister regression-guard test drives `window.SBPP.showToast(...)` directly (no page-flow / redirect dependency, post-review reshape) and asserts a routine toast auto-dismisses inside the ~6000-8000ms window so a regression bumping or zeroing the default duration fails loudly. |
 | Add a loading indicator to an action button that fires `sb.api.call(...)` without a page refresh | `window.SBPP.setBusy(btn, busy)` (`web/themes/default/js/theme.js`) writes the `data-loading="true"` + `aria-busy="true"` + `disabled` triple atomically; the CSS spinner lives in `web/themes/default/css/theme.css` under `.btn[data-loading="true"]` + the `sbpp-btn-spin` keyframe. Inline page-tail scripts inside `.tpl` files define a local `setBusy(btn, busy)` wrapper that delegates to `window.SBPP.setBusy` when present and falls back to `btn.disabled = busy` so third-party themes that strip `theme.js` still gate against double-clicks. Canonical reference shapes: the three confirm-dialog flows (`page_comms.tpl` / `page_bans.tpl` / `page_admin_admins_list.tpl`), the form-submit flows (`page_admin_groups_list.tpl` / `page_admin_groups_add.tpl` / `page_admin_bans_add.tpl` / `page_admin_bans_email.tpl` / `page_youraccount.tpl` / `page_lostpassword.tpl` / `page_login.tpl`), the row-action flows (`page_admin_servers_list.tpl` / `page_admin_bans_protests.tpl` / `page_admin_bans_protests_archiv.tpl` / `page_admin_bans_submissions.tpl` / `page_admin_bans_submissions_archiv.tpl`), and the drawer Notes paths (`theme.js`'s `submitNoteForm` / `deleteNote`). Comment edit on the banlist (`web/scripts/banlist.js`) carries the same pattern for the `sb.api.call(BansEditComment)` round-trip. Regression guards: `web/tests/e2e/specs/flows/action-loading-indicator.spec.ts` (stalls `Actions.CommsUnblock` via `page.route`, asserts the busy-attribute triple on the submit button while in flight, releases the route, and confirms the row flips in-place; the second test counts requests to prove the disabled gate blocks a double-click) **plus** `web/tests/e2e/specs/flows/loading-animations.spec.ts` (#1362 — samples `getComputedStyle(::after).transform` at multiple frame boundaries under both `reducedMotion: 'reduce'` AND `'no-preference'`, asserts the matrix values change across samples; catches the v2.0 RC1 regression where the global `prefers-reduced-motion: reduce` reset froze the spinner under reduced motion). |
 | Add a loading indicator to the player drawer or one of its lazy panes (so the chrome doesn't read as blank while the JSON action is in flight) | `renderDrawerLoading()` (header skeleton for the in-flight `bans.detail`) and `renderPaneSkeleton()` (placeholder for History / Comms / Notes activation) in `web/themes/default/js/theme.js`. Both lean on the `.skel` CSS rule in `theme.css` (linear-gradient + `shimmer` keyframe + dark-mode override + the `@media (prefers-reduced-motion: reduce)` per-rule override that keeps the shimmer sliding even under reduced motion, #1362). The header skeleton carries `[data-testid="drawer-loading"]` + `aria-busy="true"` + per-block `[data-skeleton]` (terminal markers under `#drawer-root[data-loading="true"]`); the lazy-pane skeleton carries `[data-pane-empty]` + `aria-busy="true"` and deliberately omits `[data-skeleton]` because the panel parent's `hidden` attribute doesn't compose into `[data-skeleton]:not([hidden])` and a nested marker would stall every page-load waiter that runs after the drawer opens. Class name is `.skel` (singular) — NOT `.skeleton`; the pre-fix `class="skeleton"` typo had no matching rule and the shimmer rows rendered as transparent zero-background divs (the user-visible "drawer is blank" regression). Regression guards: `web/tests/e2e/specs/flows/drawer-loading-indicator.spec.ts` (stalls `bans.detail` then `bans.player_history` via `page.route`, asserts the skeleton header is visible + the `.skel` block paints a `linear-gradient` background via `getComputedStyle(el).backgroundImage`, releases the routes, and confirms the drawer flips to `renderDrawerBody` / the pane fills with content) **plus** `web/tests/e2e/specs/flows/loading-animations.spec.ts` (#1362 — samples `getComputedStyle(.skel).backgroundPositionX` at multiple frame boundaries under both `reducedMotion: 'reduce'` AND `'no-preference'`, asserts the values change across samples; catches the v2.0 RC1 regression where the global reset froze the shimmer alongside the spinner). |
 | Surface unban-reason / removed-by inline on a public-list row (admin-lifted bans / comms — banlist-ureason or commslist-ureason inline) | `web/themes/default/page_bans.tpl` + `web/themes/default/page_comms.tpl` (#1315). Reason cell on the desktop table emits a `<div class="text-xs text-faint mt-1" data-testid="ban-unban-meta">` (or `comm-unban-meta` for comms) with "Unbanned by `<admin>`: `<reason>`" when `$ban.state == 'unbanned'` (or `$comm.state == 'unmuted'`); mobile cards mirror with the `-mobile` testid suffix. Always gated on `!$hideadminname` so anonymous viewers under a hidden-admins config don't get the admin name leaked. The `ureason` / `removedby` row fields come from the page handler's existing data path (`page.banlist.php` lines 635-643, `page.commslist.php` lines 626-635) — read-only render, no write-side overlap with #1301 / #1323's unban-reason flow. The commslist surface is higher-priority than the banlist (no drawer fallback on `<tr data-testid="comm-row">`); banlist users have the drawer as the canonical detail view. |
 | Re-apply (Reban) affordance on the public banlist for expired / unbanned rows | `web/themes/default/page_bans.tpl`. The desktop row-actions cell emits `<a class="btn btn--secondary btn--sm" data-testid="row-action-reapply" href="index.php?p=admin&c=bans&section=add-ban&rebanid={$ban.bid}&key={$admin_postkey}">…<i data-lucide="rotate-ccw">…Re-apply</a>` when `$can_add_ban && ($ban.state == 'expired' \|\| $ban.state == 'unbanned')`. The smart-default block on `admin.bans.php`'s `add-ban` section detects `?rebanid=…` and pre-populates the form via `BansPrepareReban`. Mobile parity (this PR) — the mobile card was restructured from a single wrapping `<a>` to the `page_comms.tpl` shape (`<div data-testid="ban-card">` wrapping `<a class="ban-card__summary" data-testid="drawer-trigger">` + a sibling `<div class="row-actions ban-card__actions">`), so the same Re-apply button surfaces under `data-testid="row-action-reapply-mobile"`. The drawer trigger stays the inner anchor's `data-drawer-href` + `data-testid="drawer-trigger"` so the existing responsive spec selector keeps working. |
+| Fan rcon kick / block commands out to every enabled server after a successful `Actions.BansAdd` / `Actions.CommsAdd` (the hidden `<iframe id="srvkicker">` pattern) | `web/themes/default/page_admin_bans_add.tpl` (#1441 — `Actions.BansAdd .then(r => ...)` handler reads `r.data.kickit` and spawns the iframe pointing at `pages/admin.kickit.php?check=<check>&type=<type>`) + `web/themes/default/page_admin_comms_add.tpl` (the older sibling — `Actions.CommsAdd .then(r => ...)` reads `r.data.block` and spawns the iframe pointing at `pages/admin.blockit.php?check=<steam>&type=<type>&length=<length>`). The URL parameter `check=` is symmetric across both surfaces; the JS envelope field names are NOT — bans.add returns `r.data.kickit.check` while comms.add returns `r.data.block.steam`, because `api_bans_add` and `api_comms_add` chose different envelope shapes when the kickit/blockit envelopes were originally added. Always read the server-side envelope shape (`web/api/handlers/bans.php::api_bans_add` / `web/api/handlers/comms.php::api_comms_add`) FIRST when porting between the two branches. The iframe template (`web/themes/default/page_kickit.tpl` / `page_blockit.tpl`) auto-fires `Actions.KickitLoadServers` (or `Actions.BlockitLoadServers`) on `window.addEventListener('load', ...)` which enumerates enabled servers and fans out per-server `Actions.KickitKickPlayer` / `Actions.BlockitBlockPlayer` rcon calls. The iframe is `display: none` — the operator never sees it, but the panel can spawn it from any surface that needs server-side rcon side-effects (the right-click context menu's "Kick player" item navigates to the same `pages/admin.kickit.php` URL as a top-level document instead — see "Add or extend the server-player right-click context menu" row). Don't reach for `setBusy(submitBtn, false)` after spawning the iframe — the success branch keeps the button busy through the 2s `setTimeout` that reloads the parent page (matching `page_admin_comms_add.tpl`'s shape), preventing operators from queuing a second submit while rcon fans out. Regression guards: `web/tests/e2e/specs/flows/ban-kickit-iframe.spec.ts` (#1441 — stubs both `Actions.BansAdd` and `pages/admin.kickit.php` at the network layer; asserts the iframe is spawned exactly once with `toBe(1)` on the request count so a future double-mount regression — e.g. a `.then()` chain that resolves twice, a `dispatchEvent` re-firing the submit handler, a `setBusy` gap — surfaces immediately) + `web/tests/e2e/specs/flows/kickit-iframe.spec.ts` (#1433 — exercises the deeper rcon round-trip via the context-menu path) + `web/tests/api/KickitTest.php` (PHPUnit — handler permission gate + malformed-input envelopes). Pre-#1441 the bans-add side carried a `typeof window.ShowKickBox === 'function'` guard pointing at a v1.x helper that was deleted at #1123 D1; the `if` body silently never ran and operators reported "banning doesn't kick" (the canonical "chrome reads as success while the load-bearing action never fired" UI regression — see the matching anti-pattern entry under Anti-patterns). |
 | Wrap a public-list legacy advanced-search form (banlist / commslist) in a default-collapsed `<details class="filters-details">` disclosure | `web/themes/default/page_bans.tpl` + `web/themes/default/page_comms.tpl` (#1315). The same `.filters-details` rules in `web/themes/default/css/theme.css` cover the chrome (summary chevron, `[open]` state, hover bg, focus ring, count badge); the public-list usage adds a `.filters-details__body > form.card` rule that suppresses the inner card framing because the disclosure body wraps a `{load_template file="admin.bans.search"}` (or `…comms.search`) — i.e. a sibling page-render that emits its own `<form class="card">`. The View DTO (`Sbpp\View\BanListView` / `Sbpp\View\CommsListView`) carries a `bool $is_advanced_search_open` set by the page handler from `isset($_GET['advSearch']) && (string) $_GET['advSearch'] !== ''` so the legacy `?advSearch=…&advType=…` URL shim auto-opens the disclosure. Bare `?p=banlist` / `?p=commslist` and simple-bar filters (`?searchText=` / `?server=` / `?time=`) leave it closed so the unfiltered list reaches above the fold. Selectors anchor on `[data-testid="banlist-advsearch-disclosure"]` / `[data-testid="commslist-advsearch-disclosure"]` (the `<details>`) + the `…-toggle` (the `<summary>`) + the `…-active` count badge. The same `.filters-details` chrome was introduced for admin-admins by #1303 — both surfaces share the CSS so a future tweak is single-source. |
 | Surface admin-authored per-ban / per-comm comments inline on the public banlist + commslist (`<details data-testid="ban-comments-inline">` / `comm-comments-inline`) | `web/themes/default/page_bans.tpl` + `web/themes/default/page_comms.tpl` (#BANLIST-COMMENTS, this PR). Both desktop tables render a native `<details class="ban-comments-inline">` next to the player-name cell whose `<summary>` doubles as the count chip (icon + tabular-nums count + "comment(s)" label) and whose body lists each comment with `<strong>{$com.comname}</strong>` + timestamp + `<div data-testid="ban-comment-text">{$com.commenttxt nofilter}</div>`. The `nofilter` is load-bearing because `$com.commenttxt` is server-built HTML produced by `encodePreservingBr` (per-segment `htmlspecialchars`, only `<br/>` survives) plus the URL-wrap regex that wraps already-escaped `https?://...` strings in `<a>` tags — same trust contract as the existing comment-edit-mode "Other comments" foreach at the top of `page_bans.tpl`. The mobile cards emit a non-interactive `<div data-testid="ban-comments-count-mobile">` count indicator instead — the card wraps every cell in a single `<a data-drawer-href>`, so a nested `<details>` would be invalid HTML (interactive content inside interactive content); mobile users tap through to the drawer (`renderOverviewPane` paints the same comments under `[data-testid="drawer-comments"]`). Both surfaces gate on `$view_comments` (mirrors the page handler's `Config::getBool('config.enablepubliccomments') \|\| $userbank->is_admin()` check at `page.banlist.php` line 766 / `page.commslist.php` line 734). The drawer surface (`api_bans_detail.comments_visible` + `api_bans_detail.comments`) is unchanged — both surfaces share the same data path and same gate so there's no leak risk. The commslist regression was worse than the banlist's because there's no drawer fallback on `<tr data-testid="comm-row">`; the inline disclosure is the ONLY on-page way for admins to see comm-block comment text. Regression guards: `web/tests/integration/BanlistCommentsVisibilityTest.php` (admin sees disclosure regardless of flag, anonymous gated correctly, drawer mirrors disclosure via `bans.detail`) + `web/tests/e2e/specs/flows/banlist-comments-visibility.spec.ts` (desktop disclosure renders + opens, drawer paints same data, mobile count indicator is a `<div>` not a `<details>`). The fix restores the v1.x `mooaccordion` discoverability that was lost when the v2.0 rewrite of `page_bans.tpl` collapsed the inline panel down to a silent `<span>[N]</span>` count badge with no affordance. |
 | Filter the public banlist by ban state (`?p=banlist&state=permanent\|active\|expired\|unbanned`) — server-side rowset narrowing for a chip strip | `web/pages/page.banlist.php` (#1352). The `?state=` value is allowlisted (`['permanent','active','expired','unbanned']`, anything else falls through to "All"), composed into the existing `$publicFilterAnd` / `$publicFilterWheren` SQL fragments via the per-state predicates documented inline. **Symmetric defensive shape across the four arms**: `permanent` / `active` BOTH require `RemovedOn IS NULL` (otherwise a pre-2.0 admin-lifted row with `ends > now` would match BOTH `?state=active` AND `?state=unbanned`); `expired` carries THREE arms (`RemoveType = 'E'` post-migration shape + `RemoveType IS NULL AND length > 0 AND ends < now AND RemovedOn IS NULL` for pre-475 installs the prune writer never touched + `RemoveType IS NULL AND RemovedOn IS NOT NULL AND length > 0 AND (RemovedBy IS NULL OR RemovedBy = 0)` for the fork-divergence shape `810.php` pass 2 backfills); `unbanned` carries TWO arms (`RemoveType IN ('D', 'U')` post-migration shape + `RemovedOn IS NOT NULL AND RemoveType IS NULL AND RemovedBy IS NOT NULL AND RemovedBy > 0` for pre-2.0 admin-lifts that `810.php` pass 1 backfills). The `RemovedBy > 0` vs `RemovedBy IS NULL OR = 0` split between unbanned / expired is the **load-bearing distinction** — natural expiry sets `RemovedBy = 0` (PruneBans) or NULL (pre-475); admin lifts set `RemovedBy = <aid>`. The View DTO (`Sbpp\View\BanListView`) carries `string $active_state` + `string $chip_base_link`; the chip strip in `web/themes/default/page_bans.tpl` renders as real `<a href="index.php?p=banlist{$chip_base_link}&state=…">` anchors with `aria-current="true"` (NOT `aria-pressed` — only valid on role=button; axe rejects it on `<a>` as `aria-allowed-attr`) and `data-active="true"` server-rendered on the matching chip — never `<button onclick=…>` (the legacy `web/scripts/banlist.js applyStateFilter` row-hide layer was a client-side filter on top of server-side pagination, so on installs with thousands of bans the unbanned chip silently rendered an empty page 1). The "Hide inactive" toggle is suppressed in the template when `$active_state !== ''` so the two predicates (`hideinactive` is `RemoveType IS NULL`; `?state=expired` / `unbanned` ask for the OPPOSITE) don't visually fight. Pagination URLs preserve `&state=` via `$stateFilterLink`; the per-row state classifier in the same file mirrors the SQL filter (a row pulled in by `?state=unbanned` renders the Unbanned pill, never the legacy mis-classified "Active" pill). The JSON API parity surface is `api_bans_detail` + `api_bans_player_history` in `web/api/handlers/bans.php` — same `isPre2AdminLift` defensive branch so the drawer's detail view + the history pane don't visibly contradict the SQL filter. Regression guards: `web/tests/integration/BanListStateFilterTest.php` (per-state row inclusion / exclusion + chip render contract + suppressed Hide-inactive toggle + symmetric `expired` arm 3 contract), `web/tests/integration/UpdaterBackfillRemoveTypeTest.php` (the migration's idempotency + two-pass cross-contamination contract), `web/tests/api/BansTest.php::testDetailReportsUnbannedForPre2AdminLiftWithRemoveTypeNull` (API parity), `web/tests/e2e/specs/responsive/banlist.spec.ts` + `web/tests/e2e/specs/responsive/filters.spec.ts` (mobile chip click navigates + asserts `aria-current` rather than `history.replaceState` + `aria-pressed`'ing). |
 | Edit the player-detail drawer (open trigger, tabs, panes, lazy loaders) | `web/themes/default/js/theme.js` (`renderDrawerBody` / `loadPaneIfNeeded`). The drawer handles two focal kinds via `drawerKind` (`'ban'` / `'comm'`): the bans list ships `data-drawer-bid` / `data-drawer-href` on row anchors, the comms list ships `data-drawer-cid`. `loadDrawer({kind, id})` dispatches to `Actions.BansDetail` (bid → `bans.detail`) or `Actions.CommsDetail` (cid → `comms.detail`) and stamps the response into `drawerDetail`. `loadPaneIfNeeded` then keys lazy panes off the focal kind: bans-focal History sends `{bid}` (handler excludes the focal via `BA.bid <> ?`); comm-focal History sends `{authid: drawerDetail.player.steam_id}` (no focal to exclude — different table); bans-focal Comms sends `{bid}` (resolves to authid; no comm to exclude); comm-focal Comms sends `{cid}` (handler excludes the focal cid via `C.bid <> ?` — sister contract to the bans-focal History exclusion so the Overview pane and the Comms tab don't render the same record twice). The Notes tab is admin-only and shared across both focal kinds (keys off `player.steam_id`). |
 | Add a comms-list player drawer parity surface (mirror the banlist's `data-drawer-href` row anchor with a comm-focal equivalent) | The desktop `<tr data-testid="comm-row">` and mobile `<div data-testid="comm-card">` rows in `web/themes/default/page_comms.tpl` carry a player-name anchor with `data-drawer-cid="{$comm.cid}"` + `data-testid="drawer-trigger"`. The `href` falls back to a useful no-JS surface (`?p=commslist&id=…` desktop / `?p=commslist&searchText=…` mobile) so the affordance still leads somewhere when JS is off / `theme.js` is stripped by a third-party theme. The drawer JS (`theme.js`'s document `click` delegate at `[data-drawer-bid], [data-drawer-cid], [data-drawer-href]`) routes the click through `keyFromTrigger(trigger)` which returns `{kind: 'comm', id}` for cid triggers; downstream `loadDrawer` dispatches `Actions.CommsDetail` and the renderer branches on `drawerKind === 'comm'` for the header chip ("Comm #N") and the Overview pane's focal-block grid (`[data-testid="drawer-block"]` with `Type` / `Reason` / `Started` / `Ends` rows — vs `[data-testid="drawer-ban"]` on the bans-focal path). The handler is `api_comms_detail` in `web/api/handlers/comms.php` (sister to `api_bans_detail`, same envelope shape modulo `cid` instead of `bid` / `block` instead of `ban` / `'unmuted'` instead of `'unbanned'` in the state vocab — both `api_comms_detail` AND `api_comms_player_history` use `'unmuted'` for `RemoveType IN ('U', 'D')` rows so the drawer's Overview pane and Comms tab don't render contradictory state labels for the same player). Public action; field-level hide-* gating mirrors `bans.detail`. Pill CSS lives next to `.pill--unbanned` in `theme.css` (`.pill--unmuted` carries the same success-bg + emerald colour treatment because admin-lifted is admin-lifted regardless of the focal kind). The drawer JS's `stateLabel()` switch in `theme.js` carries the matching `'unmuted' → 'Unmuted'` arm. Regression guards: `web/tests/api/CommsTest.php` (snapshot + state vocab + lifted-block branch + permanent-block branch + `comms.player_history` cid path with focal exclusion + 404 on unknown cid + lone-focal empty-feed shape) and `web/tests/e2e/specs/flows/ui/comms-drawer.spec.ts` (desktop) + `web/tests/e2e/specs/responsive/drawer.spec.ts` (mobile — clicking a `.ban-cards [data-testid="drawer-trigger"]` opens the comm-focal drawer, header reads "Comm #N", Type row in Overview pane). The desktop spec mirrors `player-drawer.spec.ts`'s isolation strategy — NO `truncateE2eDb` between tests, unique authids per (subtest × project × worker), and `seedCommOrAccept` / `seedBanOrAccept` helpers that tolerate `already_blocked` / `already_banned` so a Playwright retry on the same worker reuses the existing row. Adding a per-test truncate would only widen the cross-file race window where a concurrent worker's API call lands during another worker's truncate→reseed gap and gets a `forbidden` cascade; the comms-drawer tests are read-shaped (open the drawer, assert the chrome) so authid-namespacing is enough. |
 | Render the per-server map thumbnail in the expanded public server card | `web/themes/default/page_servers.tpl` (`<img data-testid="server-map-img" hidden>` slot inside `[data-testid="server-players-panel"]`) + `web/scripts/server-tile-hydrate.js`'s `applyData()` (patches `src` from `r.data.mapimg`, toggles `hidden` on `load` / `error`). The lookup is feature-detected via the testid so the admin Server Management list (which does NOT ship the slot) silently no-ops. The URL itself comes from global helper `\GetMapImage()` in `web/includes/system-functions.php` (falls back to `images/maps/nomap.jpg` when the file is missing); the bundled `nomap.jpg` placeholder ships under `web/images/maps/`. The slot must default to `hidden` and stay hidden on the `error` branch — fork installs without `nomap.jpg` would otherwise paint a broken-image icon. Sizing (#1375): the inline style is `display:block;width:100%;max-width:340px;height:auto;margin:0 auto 0.5rem` — `max-width: 340px` matches the natural source width of the bundled `*.jpg` thumbnails (340×255, ~4:3) so the box never upscales and never exceeds the source dimensions; `height: auto` derives the proportional height from the rendered width so the rendered box matches the source aspect ratio exactly. Pre-#1375 the slot ran `width:100%;max-height:140px;object-fit:cover` which clamped the box to a ~2.86:1 strip on a 28rem card and `object-fit:cover` cropped the middle horizontal band of a 4:3 source — operators perceived the result as "stretched horizontally". Don't reintroduce `max-height` or `object-fit:cover` here; let `height: auto` carry the proportional sizing. Regression guards: `web/tests/integration/ServerMapImageRenderTest.php` (template ships the slot + helper carries the wiring + handler still emits `mapimg`, AND `testMapImgSlotPreservesNaturalAspectRatio` pins the new `max-width: 340px` / `height: auto` shape + the absence of `max-height` / `object-fit`) + `web/tests/e2e/specs/flows/server-map-thumbnail.spec.ts` (runtime visibility under success / 404 / connect-error). #1312 restored this surface after the #1123 D1 redesign dropped the legacy `<img id="mapimg_{$server.sid}">`; #1313 moved the wiring out of the inline `<script>` block into the shared helper; #1375 fixed the squashed aspect ratio. |
-| Hydrate server-tile cards with live A2S data (status pill / map / players / hostname / refresh) on the public servers list, the admin Server Management list, the dashboard's Servers widget, the Add Admin per-server access checkbox grid, AND the admin Server Groups list's per-group card stack | `web/scripts/server-tile-hydrate.js` (`window.SBPP.hydrateServerTiles`) — auto-runs on first paint for every container marked `data-server-hydrate="auto"`. Consumed by `web/themes/default/page_servers.tpl` (public, full chrome), `web/themes/default/page_admin_servers_list.tpl` (admin, #1313 — same chrome minus the map thumbnail + players panel), `web/themes/default/page_dashboard.tpl` (dashboard Servers widget, #1375 — hostname slot only, every other testid hook deliberately omitted), `web/themes/default/page_admin_admins_add.tpl` (Add Admin per-server access checkbox grid, #1405 — same minimal-testid shape as the dashboard widget), and `web/themes/default/page_admin_groups_list.tpl` (admin Server Groups card stack, #1406 — one minimal-integration `[data-testid="server-tile"]` per server bound to the group, hostname slot only, same minimal-testid shape the dashboard widget rides). Selector contract per tile: `[data-testid="server-tile"]` outer card + `data-id="<sid>"` + `[data-testid="server-{status,map,players,host}"]` cells + optional `[data-testid="server-{refresh,toggle}"]` / `[data-players-bar]` / `[data-testid="server-players-panel"]` / `[data-testid="server-map-img"]` (every cell beyond `data-id` is feature-detected; the dashboard widget, the Add Admin grid, and the Server Groups card stack all ship ONLY `[data-testid="server-host"]` and the helper no-ops every other branch). Disabled tiles carry `data-server-skip="1"` so the helper leaves them at the server-rendered placeholder; this is single-source contract across every consumer (admin Server Management, admin Server Groups card stack — `page_admin_groups_list.tpl` pairs the gate with a visible `[data-testid="server-disabled-tag"]` "Disabled" pill so the row reads as "bound but disabled" instead of "probe hasn't resolved yet"). Never copy-paste the hydration code into a new template — wire the testids and `data-server-hydrate="auto"` instead and the helper picks the surface up automatically. The dashboard widget, the Add Admin grid, and the Server Groups card stack are all canonical references for "minimal-testid integration": each ships ONE optional testid (`[data-testid="server-host"]`) + the outer `[data-testid="server-tile"]` + `data-id="<sid>"`, and the helper still hydrates the hostname per the same `Actions.ServersHostPlayers` round-trip. The per-surface truncation knob (`data-trunchostname="<n>"` on the wrapping container) is the right place to dial the hostname length per surface — `70` on the full-width public + admin cards, `40` on the cramped dashboard widget, the Add Admin grid's ~18rem checkbox columns, AND the Server Groups card stack so a long hostname doesn't trip `truncate`'s ellipsis prematurely. The Server Groups stack also ships a `[data-testid="server-host"]`-paired `data-fallback="{ip|escape}:{port}"` attribute the helper re-paints on probe-error (`r.data.error === 'connect'`) — same shape the public Server List ships; the SSR inner-text holds the IP:port literal so the no-JS / cache-cold / helper-missing path stays informative. The per-group `servers` array the template iterates is composed server-side by `web/pages/admin.groups.php` (INNER JOIN against `:prefix_servers` so groups holding dangling `:prefix_servers_groups` rows from deleted servers don't surface broken tiles; `S.enabled` rides the projection so the template's disabled-row gate doesn't need a second query); the View DTO field is `AdminGroupsListView::$server_list[i].servers` (each row shaped `{sid: int, ip: string, port: int, enabled: bool}`) and the integration contract is pinned by `web/tests/integration/AdminServerGroupsServerCardsRenderTest.php` (file-shape) + `web/tests/e2e/specs/flows/admin-groups-server-cards-hydration.spec.ts` (runtime stub-resolve-flip + disabled-row probe-skip + dangling-membership INNER JOIN drop). The E2E spec's dangling arm rides a dedicated `web/tests/e2e/scripts/delete-server-e2e.php` shim that deletes a `:prefix_servers` row via raw SQL — bypassing `api_servers_remove`'s cleanup cascade, which would silently clean up the `:prefix_servers_groups` row in the same transaction and make the orphan condition impossible to produce. Pair with `seed-server-group-e2e.php` (which now accepts a per-server `enabled` flag) when extending coverage. The Add Admin grid restored hostname hydration that was silently broken since v2.0.0 / #1123 D1 — the legacy v1.4.11 `<script>LoadServerHost('SID', …)</script>` per-row feeder was deleted with `sourcebans.js`, raising one `ReferenceError` per configured server on every page load. Sister cleanup #1404 dropped the dead feeder + the orphan `$server_script` View property; #1405 is the additive replacement, no new View property + no new JSON action. |
+| Hydrate server-tile cards with live A2S data (status pill / map / players / hostname / refresh) on the public servers list, the admin Server Management list, the dashboard's Servers widget, the Add Admin per-server access checkbox grid, AND the admin Server Groups list's per-group card stack | `web/scripts/server-tile-hydrate.js` (`window.SBPP.hydrateServerTiles`) — auto-runs on first paint for every container marked `data-server-hydrate="auto"`. Consumed by `web/themes/default/page_servers.tpl` (public, full chrome), `web/themes/default/page_admin_servers_list.tpl` (admin, #1313 — same chrome minus the map thumbnail + players panel), `web/themes/default/page_dashboard.tpl` (dashboard Servers widget, #1375 — hostname slot only, every other testid hook deliberately omitted), `web/themes/default/page_admin_admins_add.tpl` (Add Admin per-server access checkbox grid, #1405 — same minimal-testid shape as the dashboard widget), and `web/themes/default/page_admin_groups_list.tpl` (admin Server Groups card stack, #1406 — one minimal-integration `[data-testid="server-tile"]` per server bound to the group, hostname slot only, same minimal-testid shape the dashboard widget rides). Selector contract per tile: `[data-testid="server-tile"]` outer card + `data-id="<sid>"` + `[data-testid="server-{status,map,players,host}"]` cells + optional `[data-testid="server-{refresh,toggle}"]` / `[data-players-bar]` / `[data-testid="server-players-panel"]` / `[data-testid="server-map-img"]` (every cell beyond `data-id` is feature-detected; the dashboard widget, the Add Admin grid, and the Server Groups card stack all ship ONLY `[data-testid="server-host"]` and the helper no-ops every other branch). Disabled tiles carry `data-server-skip="1"` so the helper leaves them at the server-rendered placeholder; this is single-source contract across every consumer (admin Server Management, admin Server Groups card stack — `page_admin_groups_list.tpl` pairs the gate with a visible `[data-testid="server-disabled-tag"]` "Disabled" pill so the row reads as "bound but disabled" instead of "probe hasn't resolved yet"). The public Server List ALSO renders a page-level `[data-testid="servers-summary"]` paragraph with a nested `[data-online-num]` counter that the helper paints into from `setStatus()` via `updateOnlineCount()`. The summary lives in `page_servers.tpl`'s `<header>` — a SIBLING of the `.servers-grid` `[data-server-hydrate="auto"]` container, NOT a descendant — so `summaryNode()` does a document-wide `document.querySelector('[data-testid="servers-summary"]')` fallback after the descendant-first lookup misses (#1446). The other four surfaces don't render the summary at all and the fallback returns null, so `updateOnlineCount()` no-ops cleanly. Pinned by `web/tests/integration/ServerTileHydrateOnlineCountTest.php` (static gate against the lookup contract) + `web/tests/e2e/specs/flows/servers-online-count.spec.ts` (runtime gate against the counter increment / decrement ladder). Never copy-paste the hydration code into a new template — wire the testids and `data-server-hydrate="auto"` instead and the helper picks the surface up automatically. The dashboard widget, the Add Admin grid, and the Server Groups card stack are all canonical references for "minimal-testid integration": each ships ONE optional testid (`[data-testid="server-host"]`) + the outer `[data-testid="server-tile"]` + `data-id="<sid>"`, and the helper still hydrates the hostname per the same `Actions.ServersHostPlayers` round-trip. The per-surface truncation knob (`data-trunchostname="<n>"` on the wrapping container) is the right place to dial the hostname length per surface — `70` on the full-width public + admin cards, `0` (the "no server-side truncation" sentinel: the cell's CSS `.truncate` does the responsive visual cut so the row shows as much of the name as fits in its column, #1487) on the dashboard widget, and `40` on the Add Admin grid's ~18rem checkbox columns AND the Server Groups card stack so a long hostname doesn't trip `truncate`'s ellipsis prematurely. The helper's `resolveTrunc` forwards a `0` verbatim (its `>= 0` guard deliberately does NOT coerce the sentinel back to the 70 default — a bare `(raw || 70)` would re-cap the hostname and silently reopen #1487), and the server-side `trunc()` treats a non-positive length as "return the full string". The Server Groups stack also ships a `[data-testid="server-host"]`-paired `data-fallback="{ip|escape}:{port}"` attribute the helper re-paints on probe-error (`r.data.error === 'connect'`) — same shape the public Server List ships; the SSR inner-text holds the IP:port literal so the no-JS / cache-cold / helper-missing path stays informative. The per-group `servers` array the template iterates is composed server-side by `web/pages/admin.groups.php` (INNER JOIN against `:prefix_servers` so groups holding dangling `:prefix_servers_groups` rows from deleted servers don't surface broken tiles; `S.enabled` rides the projection so the template's disabled-row gate doesn't need a second query); the View DTO field is `AdminGroupsListView::$server_list[i].servers` (each row shaped `{sid: int, ip: string, port: int, enabled: bool}`) and the integration contract is pinned by `web/tests/integration/AdminServerGroupsServerCardsRenderTest.php` (file-shape) + `web/tests/e2e/specs/flows/admin-groups-server-cards-hydration.spec.ts` (runtime stub-resolve-flip + disabled-row probe-skip + dangling-membership INNER JOIN drop). The E2E spec's dangling arm rides a dedicated `web/tests/e2e/scripts/delete-server-e2e.php` shim that deletes a `:prefix_servers` row via raw SQL — bypassing `api_servers_remove`'s cleanup cascade, which would silently clean up the `:prefix_servers_groups` row in the same transaction and make the orphan condition impossible to produce. Pair with `seed-server-group-e2e.php` (which now accepts a per-server `enabled` flag) when extending coverage. The Add Admin grid restored hostname hydration that was silently broken since v2.0.0 / #1123 D1 — the legacy v1.4.11 `<script>LoadServerHost('SID', …)</script>` per-row feeder was deleted with `sourcebans.js`, raising one `ReferenceError` per configured server on every page load. Sister cleanup #1404 dropped the dead feeder + the orphan `$server_script` View property; #1405 is the additive replacement, no new View property + no new JSON action. |
 | Tune the server card grid layout (column min-width, mobile single-column collapse) shared between the public + admin Server Management lists | `.servers-grid` rule in `web/themes/default/css/theme.css` (#1316). Single-source `repeat(auto-fill, minmax(28rem, 1fr))` — both `page_servers.tpl` and `page_admin_servers_list.tpl` apply the class to their grid container instead of an inline `style="grid-template-columns:..."`. The 28rem (448px) min replaced the pre-#1316 20rem (320px) min that packed cards into ~340px columns even on a 31" 4K monitor (both pages cap their content area at 1400px via `.page-section` / inline `max-width:1400px`, so wider viewports got zero benefit from the wider screen — that's the bug #1316 fixed). With the 1rem grid gap factored in: 1280px laptop ≈ 2 cols × ~488px each; 1400px+ desktop ≈ 2 cols × ~668px each. At <=768px the sibling `@media` rule collapses to `minmax(0, 1fr)` (NOT bare `1fr`, which would inflate the track to the card's `truncate`-nowrap min-content and overflow the viewport) so a phone-portrait viewport never overflows horizontally. Don't reach for a different column-min on a per-template basis — the class is the unified knob; theme forks override the rule wholesale. Regression guard: `web/tests/e2e/specs/responsive/server-cards.spec.ts` walks four desktop viewports (1280/1920/2560/3840) plus iPhone-13-like 390px and asserts both surfaces apply the class, the card width floor is ≥28rem, and the mobile collapse holds. |
 | Edit the command palette (icon-only trigger, ⌘K binding, result rows, kbd hints, Ctrl+Enter copy) | `web/themes/default/js/theme.js` (`openPalette` / `closePalette` / `renderPaletteResults` / `applyPlatformHints` / `handlePaletteCopyShortcut`) + `core/title.tpl` (the `.topbar__search` icon button) + the `.palette__row*` rules in `web/themes/default/css/theme.css`. Player rows carry `data-drawer-bid="<bid>"` (bare Enter / click → `loadDrawer`, palette closes itself) + `data-steamid="<steam>"` (`Ctrl/Cmd+Enter` → `navigator.clipboard.writeText` + `showToast`). The kbd glyphs are server-rendered in non-Mac form (`Enter`, `Ctrl`); `applyPlatformHints` swaps `[data-enterkey]` → ⏎ and `[data-modkey]` → ⌘ on Mac/iOS at boot and after every render (#1184, #1207 DET-2). |
 | Add or edit a palette "Navigate" entry (the icon-label-href rows the palette renders alongside player results) | `web/includes/View/PaletteActions.php` (`Sbpp\View\PaletteActions::for($userbank)` — catalog + filter). The catalog's `entries()` method declares each entry as `{icon, label, href, permission, config?}`; `for()` drops entries the user can't reach (admin entries gated via `HasAccess` with `ADMIN_OWNER` OR'd in; public entries optionally gated on a `config.enable*` toggle) and emits the public `{icon, label, href}` triple. The filtered list is JSON-encoded by `web/pages/core/footer.php` (with `JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT` so the content can never escape its `<script>` wrapper) and emitted by `core/footer.tpl` inside `<script type="application/json" id="palette-actions" data-testid="palette-actions">`. `theme.js`'s `loadNavItems()` reads + `JSON.parse`s the blob at boot. Pre-#1304 the entry list was a hardcoded `NAV_ITEMS` array in `theme.js` with no permission check, leaking admin entries to logged-out + partial-permission users; the regression guard is `web/tests/integration/PaletteActionsTest.php` (server-side filter) plus `web/tests/e2e/specs/flows/ui/command-palette-permissions.spec.ts` (end-to-end blob → DOM contract). |
 | Add a "copy this value" affordance to a panel surface (single-source clipboard wiring) | Mark the trigger with `data-copy="<value>"` (`<button type="button">` is the canonical shape; the drawer uses `<button>` inside a `<dd>`, the banlist row uses `<button>` inside `.row-actions`). The document-level COPY BUTTONS delegate in `web/themes/default/js/theme.js` handles every `[data-copy]` site: secure-context callers go through `navigator.clipboard.writeText` with a `.then(success, fallback)` chain, non-secure callers (plain HTTP behind a TLS-terminating proxy) drop to `copyFallback()` — a hidden-textarea + `document.execCommand('copy')` that's the only portable option outside HTTPS (#1308). NEVER add an inline `onclick="event.stopPropagation()"` to a `[data-copy]` button — the bubble-phase stop kills the document delegate (Defect A, #1308). NEVER assume `navigator.clipboard` exists or that `writeText()` resolves — both fall through to the same execCommand fallback (Defect B, #1308). |
 | Add admin-only per-player notes | `web/api/handlers/notes.php` (CRUD) — Notes tab is gated by `bans.detail`'s `notes_visible` flag |
-| Add or extend the server-player right-click context menu on `?p=servers` (View Profile / Copy SteamID / Kick / Ban / Block Comms) | `web/scripts/server-context-menu.js` (event-delegate menu, single `document.addEventListener('contextmenu')` filtered by `closest('[data-context-menu="server-player"]')`) + `web/scripts/server-tile-hydrate.js` (`renderPlayers()` emits the `data-context-menu` / `data-steamid` / `data-name` / `data-server-sid` / `data-can-ban-player` hooks on each `<li>`) + `web/api/handlers/servers.php` (`api_servers_host_players` attaches SteamIDs via `RconStatusCache::fetch($sid)` only when the caller has `WebPermission::Owner \| WebPermission::AddBan` AND per-server RCON access; `can_ban_player` boolean signals whether to render the kick/ban/block items) + `web/includes/Servers/RconStatusCache.php` (`Sbpp\Servers\RconStatusCache::fetch($sid, $ttl=30)` — per-sid on-disk cache under `SB_CACHE/srvstatus/`, mirrors `SourceQueryCache` shape; calls `rcon('status', $sid, true)` with the silent flag so passive probes don't spam the audit log). The admin hint copy in `page_servers.tpl` + the `<script src="./scripts/server-context-menu.js">` include are both gated on `$can_use_context_menu` (= `Perms::for($userbank)['can_add_ban']`) so anonymous viewers don't pay for either. SteamID3 / SteamID2 → SteamID64 conversion happens client-side (`STEAM_X:Y:Z` → `76561197960265728 + Z*2 + Y`; `[U:1:N]` → `76561197960265728 + N`). **The `player_list` field excludes A2S entries with an empty `Name` (#1396)** — some Source-engine variants and SourceMod plugins emit a "host slot" / "console" stub at the start of `GetPlayers` (`Name = ''`, `Frags = 0`, `Time = 0`) that pre-fix rendered as a phantom `<li data-testid="server-player">` above the first visible player with no `data-context-menu` hooks (the empty name fails the SteamID match gate above). The phantom row was a thin border-bottom strip with a misleading "0 · " meta on the right; users perceived the next real player as "the first player of the list" and right-clicks landing in the phantom row's area silently no-op'd. The filter lives at the same `$name === ''` skip the SteamID-by-name lookup uses, so the JS contract stays simple: every row in `player_list` has a displayable name. Bots, real players whose A2S name didn't match the RCON status output, and anonymous callers still render — the filter is strictly "name is empty string". Ban / Block both route through panel-chromed smart-default URLs (`?p=admin&c=bans&section=add-ban&steam=…&type=0` consumed by `Sbpp\View\AdminBansAddView::prefill_steam` / `?p=admin&c=comms&steam=…&type=0` consumed by `Sbpp\View\AdminCommsAddView::prefill_steam` — #1395 brought Block onto the panel route; pre-fix it pointed at `pages/admin.blockit.php` which is the post-`Actions.CommsAdd` rcon-fan-out iframe target, NOT a stand-alone operator page); Kick stays on the iframe path (`pages/admin.kickit.php`) because it's a one-shot RCON command with no persistent panel surface to anchor on after firing. Both `admin.bans.php` and `admin.comms.php` allowlist the inbound shape via the same regex (`STEAM_X:Y:Z` / `[U:1:N]` / 17-digit SteamID64 / dotted IPv4) so a hostile/malformed referrer can't smuggle arbitrary text into the form's `<input value="…">`; the comms `?type=…` allowlist is `{1,2,3}` (Mute/Gag/Silence) with anything else (including the menu's `?type=0` bridging value, sourced from the bans-menu URL shape where 0=Steam ID) treated as "no pre-selection". The integration test (`web/tests/integration/ServerListHintRegressionTest.php`) is the post-restoration contract — it asserts the hint and the JS include both ship for admins and both stay absent for anonymous viewers (the pre-#1306 contract is superseded). Regression guards: `web/tests/api/ServersTest.php` (handler-shape coverage for the SteamID side-channel + the `can_ban_player` flag + the #1396 empty-name filter via `testHostPlayersFiltersEmptyNameEntries` / `testHostPlayersFiltersAllEmptyNameEntries`), `web/tests/integration/RconStatusCacheTest.php` (cache shape + silent-flag contract), `web/tests/integration/AdminBansAddSmartDefaultTest.php` + `web/tests/integration/AdminCommsAddSmartDefaultTest.php` (server-side prefill allowlist, valid / hostile / bare-section round-trips, type-coercion), `web/tests/e2e/specs/flows/server-player-context-menu.spec.ts` (end-to-end menu open / Ban + Block hrefs both ride the panel route / Kick stays on the iframe route / Escape close / no-steamid no-menu / #1396 first-named-player accepts real `mouse.click({button:'right'})`). |
+| Add or extend the server-player right-click context menu on `?p=servers` (View Profile / Copy SteamID / Kick / Ban / Block Comms) | `web/scripts/server-context-menu.js` (event-delegate menu, single `document.addEventListener('contextmenu')` filtered by `closest('[data-context-menu="server-player"]')`) + `web/scripts/server-tile-hydrate.js` (`renderPlayers()` emits the `data-context-menu` / `data-steamid` / `data-name` / `data-server-sid` / `data-can-ban-player` hooks on each `<li>`) + `web/api/handlers/servers.php` (`api_servers_host_players` attaches SteamIDs via `RconStatusCache::fetch($sid)` only when the caller has `WebPermission::Owner \| WebPermission::AddBan` AND per-server RCON access; `can_ban_player` boolean signals whether to render the kick/ban/block items) + `web/includes/Servers/RconStatusCache.php` (`Sbpp\Servers\RconStatusCache::fetch($sid, $ttl=30)` — per-sid on-disk cache under `SB_CACHE/srvstatus/`, mirrors `SourceQueryCache` shape; calls `rcon('status', $sid, true)` with the silent flag so passive probes don't spam the audit log). The admin hint copy in `page_servers.tpl` + the `<script src="./scripts/server-context-menu.js">` include are both gated on `$can_use_context_menu` (= `Perms::for($userbank)['can_add_ban']`) so anonymous viewers don't pay for either. SteamID3 / SteamID2 → SteamID64 conversion happens client-side (`STEAM_X:Y:Z` → `76561197960265728 + Z*2 + Y`; `[U:1:N]` → `76561197960265728 + N`). **The `player_list` field excludes A2S entries with an empty `Name` (#1396)** — some Source-engine variants and SourceMod plugins emit a "host slot" / "console" stub at the start of `GetPlayers` (`Name = ''`, `Frags = 0`, `Time = 0`) that pre-fix rendered as a phantom `<li data-testid="server-player">` above the first visible player with no `data-context-menu` hooks (the empty name fails the SteamID match gate above). The phantom row was a thin border-bottom strip with a misleading "0 · " meta on the right; users perceived the next real player as "the first player of the list" and right-clicks landing in the phantom row's area silently no-op'd. The filter lives at the same `$name === ''` skip the SteamID-by-name lookup uses, so the JS contract stays simple: every row in `player_list` has a displayable name. Bots, real players whose A2S name didn't match the RCON status output, and anonymous callers still render — the filter is strictly "name is empty string". Ban / Block both route through panel-chromed smart-default URLs (`?p=admin&c=bans&section=add-ban&steam=…&type=0&name=…` consumed by `Sbpp\View\AdminBansAddView::prefill_steam` + `::prefill_name` / `?p=admin&c=comms&steam=…&type=0&name=…` consumed by `Sbpp\View\AdminCommsAddView::prefill_steam` + `::prefill_name` — #1395 brought Block onto the panel route; pre-fix it pointed at `pages/admin.blockit.php` which is the post-`Actions.CommsAdd` rcon-fan-out iframe target, NOT a stand-alone operator page; #1440 added the `&name=` arm so the operator-typed "Display name as it appeared in-game" field doesn't have to be re-typed by hand when the in-game name is right there in the A2S `GetPlayers` response — pre-#1440 the operator had to round-trip "right-click → Ban → form opens with empty nickname → copy name from the row I just right-clicked → paste → submit" which is busywork the menu can save). The JS side URL-encodes the name via `encodeURIComponent` only when the source `data-name` attribute is non-empty (anonymous / bot rows pass through to the form with no nickname pre-fill — operator types it). Both `admin.bans.php` and `admin.comms.php` allowlist the inbound steam shape via the same regex (`STEAM_X:Y:Z` / `[U:1:N]` / 17-digit SteamID64 / dotted IPv4) so a hostile/malformed referrer can't smuggle arbitrary text into the form's `<input value="…">`; the comms `?type=…` allowlist is `{1,2,3}` (Mute/Gag/Silence) with anything else (including the menu's `?type=0` bridging value, sourced from the bans-menu URL shape where 0=Steam ID) treated as "no pre-selection". The `?name=` arm has its own server-side sanitization contract (#1440) centralised in `Sbpp\Util\PlayerName::sanitisePrefill()` (`web/includes/Util/PlayerName.php`) — both page handlers (`admin.bans.php` + `admin.comms.php`) call the helper so the strip set, UTF-8 validation, and codepoint cap stay byte-identical across the two surfaces. The pipeline: `trim` → strip ASCII control chars (`\x00-\x1F`, `\x7F`) + C1 controls (`\x80-\x9F`) + soft hyphen (`U+00AD`) + zero-width space (`U+200B`) + Unicode line/paragraph separators (`U+2028` / `U+2029`) + bidi format/override (`U+202A-U+202E`) + bidi isolate (`U+2066-U+2069`) + BOM (`U+FEFF`) via a single `preg_replace` against `PlayerName::SANITISE_STRIP_REGEX` → `mb_check_encoding('UTF-8')` (drop entirely on malformed UTF-8) → `mb_substr(..., 0, 128, 'UTF-8')` to `PlayerName::MAX_CODEPOINTS` matching the `varchar(128)` schema width of `:prefix_bans.name` / `:prefix_comms.name`. Smarty's global auto-escape handles `<>&"'` at the template `value="{$prefill_name}"` site so a literal `<script>` in the player name surfaces as visible escaped text in the input, not as executed JS. The codepoint-based truncation (NOT byte-based) prevents a UTF-8 multibyte sequence — including 4-byte emoji — from being cut mid-character into invalid bytes that would later trip `mb_check_encoding` on round-trip. The bidi-control strip is the load-bearing defence against right-to-left override (`U+202E`) name-spoofing attacks where a hostile player picks a name like `evil\u202Eadmin` that visually renders as `evilnimda` in the form — pre-strip the operator might submit a ban with what they perceived to be a different name than what's actually stored. The `?name=` arm is intentionally decoupled from the `?steam=` arm: the operator landed on the form to type a ban / block, so the nickname pre-fill survives even when the steam shape fails its allowlist (the operator can still see "this is the player I right-clicked" and then type / paste the correct ID). Kick stays on the iframe path (`pages/admin.kickit.php?check=…&type=0&mode=kick`) because it's a one-shot RCON command with no persistent panel surface to anchor on after firing — the iframe doesn't render a nickname input so it doesn't consume the `&name=` arm. **The `&mode=kick` qualifier on the Kick URL is the #1439 contract.** `pages/admin.kickit.php` reads `$_GET['mode']`, allowlists to `'ban'` (default; the post-ban iframe embed inside `admin.bans.php`'s "Ban Added" success dialog never supplies the param) or `'kick'` (this context-menu flow); `KickitView` carries the value into `page_kickit.tpl`; the iframe template forwards it on every `kickit.kick_player` JSON call; `api_kickit_kick_player` re-validates and branches on the value via `_api_kickit_should_update_ban_sid($mode)`: kick mode SKIPS the `:prefix_bans` UPDATE (`UPDATE :prefix_bans SET sid = :sid WHERE authid = :authid AND RemovedBy IS NULL` for Steam-ID kicks, or the IP-keyed equivalent for IP-type kicks) that's only meaningful when a ban row exists, and emits "You have been kicked from this server" as the rcon kick message instead of "You have been banned by this server, check $domain for more info" (the ban-mode message that pre-#1439 surfaced to every kicked player regardless of intent). The iframe's post-completion redirect also branches on mode — `?p=servers` on kick mode (operator came from the public servers page; landing back on it preserves their context), `?p=admin&c=bans` on ban mode (the established post-ban iframe destination). Pre-#1439 the iframe shipped no mode signal at all, so `api_kickit_kick_player` defaulted to the ban-completion code path — surfacing the wrong rcon message + (worse) silently mutating whatever ban row happened to share the SteamID with the kicked player. The reason kick stays on the iframe path AT ALL is that the operator UX wants "fire-and-forget per-server fan-out across every reachable server"; switching kick to a panel-chromed surface would require a paired form + a permission-mapped multi-server fan-out, which is out of scope for #1439. The integration test (`web/tests/integration/ServerListHintRegressionTest.php`) is the post-restoration contract — it asserts the hint and the JS include both ship for admins and both stay absent for anonymous viewers (the pre-#1306 contract is superseded). Regression guards: `web/tests/api/ServersTest.php` (handler-shape coverage for the SteamID side-channel + the `can_ban_player` flag + the #1396 empty-name filter via `testHostPlayersFiltersEmptyNameEntries` / `testHostPlayersFiltersAllEmptyNameEntries`), `web/tests/integration/RconStatusCacheTest.php` (cache shape + silent-flag contract), `web/tests/integration/AdminBansAddSmartDefaultTest.php` + `web/tests/integration/AdminCommsAddSmartDefaultTest.php` (server-side prefill allowlist, valid / hostile / bare-section round-trips, type-coercion), `web/tests/api/KickitTest.php` (#1439 — `testKickPlayerAcceptsModeKickAndReturnsNoConnectShape` / `testKickPlayerAcceptsModeBanAndReturnsNoConnectShape` / `testKickPlayerCoercesUnknownModeToBan` pin the dispatcher's accept-and-coerce contract; `testBuildKickMessageBranchesByMode` / `testBuildKickMessageCoercesUnknownModes` pin the message-text branching against the public `_api_kickit_build_kick_message` helper that was lifted out of the handler so the message-text contract is unit-testable without a live RCON socket; `testShouldUpdateBanSidBranchesByMode` / `testShouldUpdateBanSidCoercesUnknownModesToBanBehavior` / `testHandlerInvokesShouldUpdateHelperBeforeUpdate` pin the ban-UPDATE gate via the lifted `_api_kickit_should_update_ban_sid` helper — the handler-static guard prevents future inlining of `$mode === 'ban'` checks around the UPDATE), `web/tests/e2e/specs/flows/server-player-context-menu.spec.ts` (end-to-end menu open / Ban + Block hrefs both ride the panel route / Kick stays on the iframe route AND carries `&mode=kick` per #1439 / Escape close / no-steamid no-menu / #1396 first-named-player accepts real `mouse.click({button:'right'})` / #1440 name `encodeURIComponent` round-trip), `web/tests/e2e/specs/flows/kickit-iframe.spec.ts` (#1439 — `mode=kick: title says Kick, payload carries mode, redirect targets /servers` pins the iframe's three-contract bundle: page title, JSON-payload mode propagation, post-completion redirect target asserted via real `page.waitForURL` against the iframe's 5s redirect timer, not a source-grep that both ternary literals satisfy regardless of mode). |
+| Sanitise a player display name received from an operator-controlled URL query parameter (the `?name=…` smart-default pre-fill arm on `?p=admin&c=bans&section=add-ban` + `?p=admin&c=comms`) | `Sbpp\Util\PlayerName::sanitisePrefill(string $raw): string` (`web/includes/Util/PlayerName.php`, #1440). Single source for the strip set + UTF-8 validation + codepoint cap; both page handlers (`web/pages/admin.bans.php` + `web/pages/admin.comms.php`) call it so the contract stays byte-identical across the two surfaces. Pipeline: `trim` → `preg_replace` against `PlayerName::SANITISE_STRIP_REGEX` (ASCII controls `\x00-\x1F` + `\x7F` + C1 controls `\x80-\x9F` + soft hyphen `U+00AD` + ZWSP `U+200B` + line/paragraph separators `U+2028`/`U+2029` + bidi format/override `U+202A-U+202E` + bidi isolate `U+2066-U+2069` + BOM `U+FEFF`) → `mb_check_encoding(..., 'UTF-8')` (drop entirely on malformed input) → `mb_substr(..., 0, PlayerName::MAX_CODEPOINTS=128, 'UTF-8')` to the `varchar(128)` schema width of `:prefix_bans.name` / `:prefix_comms.name`. The bidi-control strip is the load-bearing defence against right-to-left override (`U+202E`) name-spoofing attacks where a hostile in-game name visually renders as a different string in the form's `<input>` than what's actually stored. The codepoint-based truncation (NOT byte-based) handles 4-byte emoji without slicing mid-character. Use this helper for any future operator-controlled query-parameter that pre-fills a `varchar(128) player.name` form field; do not hand-roll a parallel strip regex (the pre-#1440 reviewer-feedback iteration was a duplicated inline `preg_replace` across both page handlers — centralisation is the contract). Regression guards: `web/tests/integration/AdminBansAddSmartDefaultTest.php` + `web/tests/integration/AdminCommsAddSmartDefaultTest.php` (`hostileNamePrefillProvider` covers every codepoint class in the strip regex + 4-byte emoji + invalid UTF-8 + 128-codepoint cap; `testNameWithoutSteamPrefillsNicknameOnly` + `testValidNameWithInvalidSteamPrefillsNicknameOnly` pin the `?name=` / `?steam=` orthogonality contract); `web/tests/e2e/specs/flows/server-player-context-menu.spec.ts` (`encodes special characters in the name parameter (#1440)` — end-to-end `encodeURIComponent` round-trip from the menu's `data-name` attribute through the form's rendered `value="…"`). |
 | Cache an A2S `GetInfo + GetPlayers` round-trip / add another public server-query handler | `web/includes/Servers/SourceQueryCache.php` (`Sbpp\Servers\SourceQueryCache::fetch($ip, $port, $ttl=30)` — per-`(ip, port)` on-disk cache under `SB_CACHE/srvquery/`, atomic tempfile + `rename()` writes mirroring `system.check_version`'s release cache; both success and failure cache so an unreachable server costs ONE A2S probe per ~30s window). The sibling `Sbpp\Servers\RconStatusCache` (`SB_CACHE/srvstatus/`) follows the same shape for RCON `status` round-trips — used by `api_servers_host_players` to surface per-player SteamIDs to admins (see the context-menu row above). Every public handler under `web/api/handlers/servers.php` (`api_servers_host_players` / `host_property` / `host_players_list` / `players`) goes through this — never call `new SourceQuery()` directly from a handler. The cache stamps user-agnostic data only; the handler stamps per-caller fields (`is_owner`, `can_ban`, the per-call `trunchostname`) on top. Per-tile JS debounce on the public servers page lives in `web/themes/default/page_servers.tpl` (`loadTile()` flips `tile.__sbppLoading` + the Re-query button's `disabled` attr while a probe is in flight, releases both in the success / error tails). The matching JS gate on the toggle button has been the precedent since v2.0.0; #1311 brought the refresh button onto the same shape. Tests: `web/tests/integration/SourceQueryCacheTest.php` (cache shape + coalescing + TTL + invalidation, drives `setProbeOverrideForTesting()` so the assertion is deterministic without UDP) + `testHostPlayersCoalescesRapidRepeatCallsViaCache` / `testHostPlayersNegativeCachesUnreachableServers` in `web/tests/api/ServersTest.php` (handler-shape coverage). E2E: `web/tests/e2e/specs/flows/server-refresh-debounce.spec.ts`. |
 | Render admin-authored Markdown to safe HTML | `web/includes/Markup/IntroRenderer.php` (`Sbpp\Markup`) |
-| Build / extend the anonymous opt-out daily telemetry payload (#1126) | `web/includes/Telemetry/Telemetry.php` (`Sbpp\Telemetry\Telemetry` — `tickIfDue`, `collect`, `send`) + `web/includes/Telemetry/Schema1.php` (`Sbpp\Telemetry\Schema1::payloadFieldNames()`, drives the extractor parity test) + `web/includes/Telemetry/schema-1.lock.json` (vendored from [sbpp/cf-analytics](https://github.com/sbpp/cf-analytics) — manual sync via `make sync-telemetry-schema`). Tick is registered at the tail of `init.php` via `register_shutdown_function`; on FPM, `fastcgi_finish_request()` flushes the response BEFORE the cURL POST so telemetry never delays a panel page. Slot reservation is atomic (`UPDATE :prefix_settings WHERE CAST(value AS UNSIGNED) <= :threshold`) at the START of the attempt, so a flapping endpoint costs one ping/day, not one ping/request. Audit-log only enable/disable transitions, never individual pings. The in-panel disclosure surface is the help-icon copy in `page_admin_settings_features.tpl`; the upgrade-time disclosure lives in `docs/src/content/docs/updating/1.8-to-2.0.mdx` (no first-login modal). |
+| Write or edit a user-facing string (panel UI text, toast body, docs page) | See "User-facing text style (panel UI + docs)" under Conventions. Three rules: no emdash (`—`), terse, don't over-explain. Applies to `web/themes/default/**/*.tpl`, `\Sbpp\View\Toast::emit` titles + bodies, `echo` output from page handlers, and every `docs/src/content/docs/**/*.{md,mdx}` page. Does NOT apply to `AGENTS.md` / `ARCHITECTURE.md` / contributor docs / code comments / audit-log entries / test fixtures. Anti-pattern entries paired under "Anti-patterns". |
+| Build / extend the anonymous opt-out daily telemetry payload (#1126) | `web/includes/Telemetry/Telemetry.php` (`Sbpp\Telemetry\Telemetry` — `tickIfDue`, `collect`, `send`) + `web/includes/Telemetry/Schema1.php` (`Sbpp\Telemetry\Schema1::payloadFieldNames()`, drives the extractor parity test) + `web/includes/Telemetry/schema-1.lock.json` (vendored from [sbpp/cf-analytics](https://github.com/sbpp/cf-analytics) — manual sync via `make sync-telemetry-schema`). Tick is registered at the tail of `init.php` via `register_shutdown_function`; on FPM, `fastcgi_finish_request()` flushes the response BEFORE the cURL POST so telemetry never delays a panel page. Slot reservation is atomic (`UPDATE :prefix_settings WHERE CAST(value AS UNSIGNED) <= :threshold`) at the START of the attempt, so a flapping endpoint costs one ping/day, not one ping/request. Audit-log only enable/disable transitions, never individual pings. The in-panel disclosure surface is the help-icon copy in `page_admin_settings_features.tpl`; the upgrade-time disclosure lives in `docs/src/content/docs/updating/1-8-to-2-0.mdx` (no first-login modal). |
 | Add or edit a project announcement (the admin-only banner on the home dashboard) | Edit `docs/public/announcements.json` (the source of truth — Astro publishes it as a static asset at `https://sbpp.github.io/announcements.json`). Each entry: `id` (≤64 chars, **required**), `title` (**required**), `body_md` (CommonMark, optional — rendered through `Sbpp\Markup\IntroRenderer` so raw HTML is escaped + `javascript:` / `data:` URLs are stripped), `url` (optional `http(s)://` only — non-http schemes rejected at the parser), `published_at` (optional ISO-8601 or unix int — drives the sort order; entries without it sort below dated entries), `expires_at` (optional — the parser drops entries past this timestamp). Sorted newest-first by the panel; convention is to also place the newest entry at the top of the array so reviewers see the most relevant change first. The deploy chain is automatic: a push to `main` that touches `docs/` fires `.github/workflows/docs-deploy-trigger.yml` which lands the file at `https://sbpp.github.io/announcements.json` within minutes. The starter file ships as `[]` (empty array). NEVER write to the cache file (`SB_CACHE/announcements.json`) directly — the panel's shutdown hook owns that path. |
 | Add or edit a project sponsor, funding platform, or sponsor tier | Edit `docs/src/data/sponsors.json` (the single source of truth). Three top-level keys: `platforms` (`{id, name, url, description?, icon?}` — the funding channels; GitHub Sponsors today, append Open Collective / Patreon / etc. as they're approved), `tiers` (`{id, name, monthlyMinUsd?, description?}` — ordered list driving the sponsor-roll display order), `sponsors` (`{name, url?, logo?, tier?, since?}` — `tier` matches a `tiers[].id`; missing/empty/unknown places the sponsor in the "Individual supporters" bucket). The component `docs/src/components/Sponsors.astro` renders the file on the canonical `/sponsor/` landing page (`docs/src/content/docs/sponsor.mdx`, `template: splash`, intentionally absent from the sidebar in `astro.config.mjs`); the topbar heart icon, the per-page footer link in `docs/src/components/Footer.astro`, and `.github/FUNDING.yml`'s `custom:` URL all route there. Adding a new platform / sponsor is a one-line append here — no component, config, or template edit needed. Companion issue #1417 will surface the same data on the panel footer; a future README-injector script will read the same file into the main `README.md`'s `<!-- sponsors:start --> ... <!-- sponsors:end -->` markers. The starter file ships with one `platforms` entry (GitHub Sponsors) and empty `tiers` + `sponsors` arrays. Issue #1416. |
 | Embed the sponsor roll on a docs page other than `/sponsor/` (e.g. a future docs index hero) | Import `docs/src/components/Sponsors.astro` and render `<Sponsors showPlatforms={false} />` — the component reads `docs/src/data/sponsors.json` and renders just the tier-grouped roll (with the "Individual supporters" bucket) when `showPlatforms` is false. `showEmptyHint={false}` additionally suppresses the "be the first" line when the roll is empty. The component renders its own `<h2>` headings; the embedding page should not add a parallel `## Our sponsors` heading or the chrome doubles. Issue #1416. |
 | Build / extend the daily project-announcements feed (banner-side wiring; mirror of telemetry) | `web/includes/Announce/AnnouncementFetcher.php` (`Sbpp\Announce\AnnouncementFetcher` — `latest()`, `tickIfDue()`, `_setHttpFetcherForTests()`) + `web/includes/Announce/Announcement.php` (the readonly DTO). Tick is registered at the tail of `init.php` via `register_shutdown_function`, gated on a non-empty `SB_ANNOUNCEMENTS_URL` constant (with the `if (!defined(...))` shape so `config.php` can override — empty string is the documented air-gap escape hatch; non-`http(s)://` schemes are also treated as air-gap by `resolveUpstreamUrl`'s scheme guard so a `file://` / `php://` / `phar://` / `data://` typo can't pull arbitrary local files into the cache). Cache shape mirrors `system.check_version`'s `_api_system_release_save_cache` (atomic tempfile + rename under `SB_CACHE/announcements.json`, persisted as the upstream body verbatim; the cache load path also caps the read at 256 KiB so a hostile / hand-edited cache file can't OOM the worker before the post-read size check fires). Wire layer mirrors `system.check_version`'s fetch helper: 5s combined connect+read timeout (PHP's stream wrapper exposes a single knob — split into connect + total only if a future cURL reshape lands), `User-Agent: SourceBans++/<ver> (announcements)`, 256 KiB body cap. The page handler in `web/pages/page.home.php` short-circuits to `null` for anonymous + non-admin viewers; the View DTO `HomeDashboardView` carries `?array $announcement`; the template (`page_dashboard.tpl`) gates the entire `<aside>` block on truthy. Markdown rendering goes through `Sbpp\Markup\IntroRenderer::renderIntroText()` and lands as `body_html` on the DTO — the template emits it with `{nofilter}` per the documented contract. Test override: `_setHttpFetcherForTests(?callable)` mirrors `Sbpp\Servers\SourceQueryCache::setProbeOverrideForTesting`. Regression guards: `web/tests/integration/AnnouncementFetcherTest.php` (cache shape, atomic write, stale-while-error, body-cap, expired-entry filter, malformed JSON, IntroRenderer integration, URL-scheme rejection, dedup, sort), `web/tests/integration/HomeDashboardAnnouncementTest.php` (admin sees / anonymous doesn't / cold cache yields null — process-isolated render with stub Smarty), `web/tests/e2e/specs/flows/dashboard-announcement.spec.ts` (end-to-end mount + disclosure expand + `rel="noopener noreferrer"` + axe-clean + anonymous-storage-state arm). E2E cache seeding shim: `web/tests/e2e/scripts/seed-announcements-e2e.php` + `seedAnnouncementsE2e` / `clearAnnouncementsCacheE2e` in `fixtures/db.ts`. See "Project announcements feed" under Conventions. |
 | Flip a `:prefix_settings` row (feature toggle) from an E2E spec so the surface under test renders | `setSettingE2e(setting, value)` from `web/tests/e2e/fixtures/db.ts` (#1402). Shells out to `web/tests/e2e/scripts/set-setting-e2e.php` which `REPLACE INTO`s the row — mirror of the `REPLACE INTO sb_settings` shape `BansTest.php` uses to enable `config.enablegroupbanning` for the same reason. Pair with `afterAll(async () => { await setSettingE2e(key, defaultValue); })` because the e2e DB is shared between specs (`Fixture::truncateAndReseed` does NOT reset `sb_settings`). Reference: the group-ban dispatcher spec (`web/tests/e2e/specs/flows/groupban-dispatcher.spec.ts`) flips `config.enablegroupbanning` on in `beforeAll` and reverts in `afterAll`. Don't drive the change through `Actions.SettingsSave` from the spec — that requires CSRF + an Owner-permission + would fan out through `Config::init()` + audit-log writes on every flip, way more moving pieces than the spec needs. |
+| Build / extend the owner-only full data export feature (the panel-wide JSONL+demos ZIP bundle download / S3 upload) | Five classes under `web/includes/Export/` + entry point + admin page. `Sbpp\Export\ManifestBuilder` (`web/includes/Export/ManifestBuilder.php`) — pre-flight pass. `build()` produces a `Manifest` DTO carrying row counts + demo byte totals + UUIDv4 `bundle_id` + the `pii_policy` block + the `exceeds_cap` / `cap_bytes` flags (S3-PUT-cap semantics; informational on direct-ZIP-download mode). The cap is mode-conditional and lives in the entry point (`web/export.php`), not in the builder: zip mode is uncapped (Zip64 enabled by default in `maennchen/zipstream-php` v3.x — the consumer-compatibility argument from the original "No ZIP64" stance no longer holds in practice), s3 mode caps at `Manifest::MAX_S3_PUT_BYTES - Manifest::SAFETY_MARGIN_BYTES` (5 GiB minus 64 MiB; structural to the S3 single-PUT object-size limit shared by AWS S3, Cloudflare R2, MinIO, Backblaze B2, Wasabi). The s3 arm short-circuits with `ExportError::CAP_EXCEEDED` BEFORE launching the build when `$manifest->exceeds_cap` is true. `Sbpp\Export\EntityExporter` (`web/includes/Export/EntityExporter.php`) — per-entity SELECT + JSONL emission via `Database::iterate()` (no entity in PHP memory). One public method per entity (`admins`, `bans`, `comms`, `log`, `notes`, …). Hard-coded `FORBIDDEN_ADMIN_COLUMNS` / `FORBIDDEN_SERVER_COLUMNS` / `FORBIDDEN_SETTING_KEYS` filter at the SQL `SELECT`/`WHERE` layer — `admins.password` / `validate` / `attempts` / `lockout_until`, `servers.rcon`, `settings` rows keyed `smtp.pass` / `telemetry.instance_id` never reach JSONL regardless of caller. Per-row contracts (uniform across every entity): `null` for absent values (never `""`), timestamps as unix-seconds integers, Steam64 as decimal STRINGS (Steam64 exceeds `Number.MAX_SAFE_INTEGER` and silently round-trips wrong through any consumer using double-precision floats — `authid_steam2` preserves the legacy `STEAM_X:Y:Z` shape alongside), source PKs renamed to `id` where the source's PK is a single column. Per-entity derivations: `comms.mute_kind` (`mute|gag|silence|unknown` from `:prefix_comms.type`), `bans.state` (mirrors `page.banlist.php`'s `BanType×BanRemoval` classifier), `bans.demo_filename` + `bans.demo_size_bytes` (LEFT JOIN against `:prefix_demos`; both `null` when no demo file exists), `log.level` (`message|warning|error` from `LogType`). JSON encoder flags ALWAYS include `JSON_INVALID_UTF8_SUBSTITUTE` — player names on `:prefix_bans.name` / `:prefix_comms.name` can carry malformed UTF-8 from the pre-#1108 / #765 Latin-1-on-utf8 truncation shape; without the flag the export 500s mid-stream on a hostile-historical row (same load-bearing reason `Toast::emit` carries the flag). `Sbpp\Export\BundleWriter` (`web/includes/Export/BundleWriter.php`) — orchestrates. Takes `ZipStream\ZipStream` + `Manifest` + `EntityExporter` + `?int $capBytes` (nullable; `null` = uncapped zip mode, non-null = enforced s3-mode budget). Emits `manifest.json` FIRST via `addFile()` (the manifest-first contract — downstream consumers can read the manifest by parsing one central-directory entry; pinned by `ExportBundleWriterTest::statIndex(0)['name'] === 'manifest.json'`), then iterates entity exporters via `addFileFromCallback()` in deterministic name order, then iterates demos via `addFileFromPath(..., compressionMethod: CompressionMethod::STORE)` (demos are already DEFLATE'd by the Source engine; re-compressing is a CPU tax for no gain). Tracks running compressed-byte total and, when `$capBytes !== null`, aborts with `ExportError::CAP_EXCEEDED` if it exceeds the budget (defence-in-depth against `ManifestBuilder`'s pre-flight estimate undershooting on the s3-mode arm). When `$capBytes === null` (zip mode) the cap check no-ops and the bundle can grow arbitrarily large (Zip64 is enabled by default in the v3.x `ZipStream` constructor). zip-mode runs with `flushAfterEntries=true` (each `flush() + @ob_flush()` after every entry keeps the browser progress bar moving); s3-mode runs with `flushAfterEntries=false` (output is a tempfile, no socket to flush to). `Sbpp\Export\S3PresignedUploader` (`web/includes/Export/S3PresignedUploader.php`) — cURL `PUT` against the operator-supplied presigned URL. Scheme guard is unconditional: `https://` only, `http://` raises `ExportError::PRESIGN_INVALID_SCHEME` before any network call (panel-full PII dataset in flight, cleartext transit unsupported). URL parse failures raise `PRESIGN_INVALID_URL`. cURL uses `CURLOPT_CUSTOMREQUEST='PUT'` + `CURLOPT_INFILE` + `CURLOPT_INFILESIZE` + explicit `Content-Length` header (presigned PUT signatures bind the Content-Length value); `CURLOPT_CONNECTTIMEOUT=60`, `CURLOPT_TIMEOUT=0` (no overall ceiling — uploads can be slow). HTTP 200/201/204 success; anything else raises `S3_PUT_FAILED` with the response body truncated to 2 KiB for diagnostics. Test override: `_setHttpTransportForTests(?callable)` mirrors `Sbpp\Announce\AnnouncementFetcher::_setHttpFetcherForTests`. `Sbpp\Export\ExportError` (`web/includes/Export/ExportError.php`) — `final class extends \RuntimeException` carrying the wire-facing code as a `public readonly string $errorCode` (the property is renamed because the parent `\Exception::$code` is `int`-typed and can't be narrowed to a `readonly string`); call sites consume the value via the `code()` accessor. Error codes as class constants (`CAP_EXCEEDED`, `S3_PUT_FAILED`, `PRESIGN_INVALID_SCHEME`, `PRESIGN_INVALID_URL`, `DISK_WRITE_FAILED`, `DISK_FULL`) so call sites can't typo a string literal. Entry point: `web/export.php` (panel-root because binary wire format doesn't fit the JSON API dispatcher's contract — same shape as `web/exportbans.php` / `web/getdemo.php`). POST-only (GET returns HTTP 405 with `Allow: POST`), CSRF-gated, owner-only via `WebPermission::Owner` (deny branch lands `LogType::Warning` in audit log), shared-host hardening (`@set_time_limit(0)` + `@ini_set('memory_limit', '256M')` + `ignore_user_abort(true)`), output-buffer drain + `X-Accel-Buffering: no` + `apache_setenv('no-gzip', '1')`. Mode dispatch via `$_POST['mode']` (`'zip'` streams to `php://output`; `'s3'` builds to `SB_CACHE/exports/<bundle_id>.zip` tempfile + `register_shutdown_function` cleanup hook + `S3PresignedUploader::upload()` + 302 to `?p=admin&c=export&result={success\|error}&...`). Catches ONLY `ExportError` — anything else propagates to the dispatcher's generic 500 so real bugs surface in the audit log via the project's error handler. Page handler: `web/pages/admin.export.php` re-checks `CheckAdminAccess(ADMIN_OWNER)` (defence-in-depth — page-builder route also gates), runs `ManifestBuilder::build()` for counts-only, mounts `new AdminTabs([], $userbank, $theme)` (back-link-only partial, same shape as `admin.email.php`), reads `?result=…&code=…` and emits `\Sbpp\View\Toast::emit` accordingly (success uses default chrome timing; failure uses persistent `duration_ms: 0` + `$redirect: null` so the operator MUST acknowledge before moving on), renders via `Sbpp\View\AdminExportView` + `web/themes/default/page_admin_export.tpl`. Owner-only by design: every PII category in scope (admin emails, IPs, every Steam ID, every unban reason, every comment) means a partial-permission admin who could export everything is functionally an owner; granular delegation deliberately deferred. No new permission flag (`ADMIN_OWNER` only); no schema change (V1 is one-shot per request; the audit log carries the durable record); no JSON API handler (the entry point's binary wire format doesn't fit). Routing wired into `web/includes/page-builder.php` (`'export' => [..., 'permission' => ADMIN_OWNER]`), `web/pages/core/navbar.php` (`'permission' => ADMIN_OWNER`), and `web/includes/View/PaletteActions.php` (`'permission' => \WebPermission::Owner->value`). See "Full data export" under Conventions for the full contract (the per-entity wire-format contracts subsection covers the `null`-for-absent + Steam64-as-string + unix-seconds rules; the lifecycle subsection covers the entry-point + page-handler + toast emission chain). Operator-facing docs at `docs/src/content/docs/configuring/data-export.mdx`. Regression guards: `web/tests/unit/EntityExporterTest.php` (per-entity contracts), `web/tests/unit/ManifestBuilderTest.php` (cap math + UUIDv4 + PII policy + format version), `web/tests/integration/ExportBundleWriterTest.php` (end-to-end bundle against the test fixture — manifest-first, row-count parity, demo entries are STORE-compressed, Steam64 is string not number, forbidden values absent), `web/tests/integration/AdminExportPermissionTest.php` (static-shape permission gate across navbar / palette / page-builder / page-handler / entry-point), `web/tests/integration/AdminExportRuntimePermissionTest.php` (runtime-primitive gate for CSRF + `HasAccess(WebPermission::Owner)` — SourceMod root char alone does NOT grant `WebPermission::Owner`), `web/tests/integration/S3PresignedUploaderTest.php` (wire-layer via `_setHttpTransportForTests` — scheme rejection / URL parse rejection / happy path / 403 → `S3_PUT_FAILED`), `web/tests/e2e/specs/flows/data-export.spec.ts` (Playwright end-to-end — admin clicks "Export as ZIP", downloads stream, `jszip` parses, manifest carries `format_version: 1` + valid UUIDv4 + `pii_policy.password_hashes: "never"`; `GET /export.php` returns HTTP 405). |
+| Generate a presigned S3 PUT URL for the panel's "Full data export" S3 mode | Operator-side workflow — the panel never generates the URL itself, only consumes it. AWS: `aws s3 presign s3://bucket/key --http-method PUT --expires-in 3600` (the `--http-method PUT` flag is load-bearing — defaults to GET). Cloudflare R2: same `aws` CLI configured against an R2 token + `--endpoint-url https://<account-id>.r2.cloudflarestorage.com`; or `wrangler r2 object put` with `--presign`; or the R2 dashboard's "Generate URL" tool. MinIO: `mc share upload --expire 1h myminio/bucket/key` (note `share upload`, NOT `share download` — distinct presign flavours). The presigned URL is a single-use write credential; use a short expiry (≤1 hour) and never paste the URL into chat / public logs / issue trackers (anyone who sees it can PUT arbitrary content to your bucket until it expires). Operator-facing docs at `docs/src/content/docs/configuring/data-export.mdx` carry the worked examples per provider. |
 | Add a cross-repo JSON contract (vendored schema lock + reader + extractor parity test) | `web/includes/Telemetry/Schema1.php` is the reference shape (`payloadFieldNames(): list<string>` over a Draft-7 JSON Schema lock file). Pair with one PHPUnit extractor parity test (collect() vs. lock file in both directions). The schema lock file is the single source of truth — don't mirror the field list into a markdown doc paired with a separate parity test, that pattern was tried for telemetry and removed because the duplication paid for the drift risk it created. Sync via a manual `make sync-<subsystem>-schema` target — no scheduled auto-PR. See "Cross-repo JSON contracts" under Conventions. |
 | Display a user's own permission flags grouped by category | `Sbpp\View\PermissionCatalog::groupedDisplayFromMask($mask)` (`web/includes/View/PermissionCatalog.php`). Adding a new flag to `web/configs/permissions/web.json` requires a paired entry in `WEB_CATEGORIES`; `PermissionCatalogTest` enforces it. |
+| Resolve the operator-configurable `template.logo` setting to a brand-mark path for the chrome (`core/navbar.tpl` sidebar + `page_login.tpl` sign-in card) | `Sbpp\View\BrandLogo::resolve()` (theme-relative path) and `Sbpp\View\BrandLogo::resolveUrl()` (public URL) in `web/includes/View/BrandLogo.php`. Single source for the fallback ladder: trim → empty? → defaults to `BrandLogo::DEFAULT_PATH` (`images/favicon.svg`, the SourceBans++ shield from the favicon set); leading-`/` strip; reject `..` / `\` / `\0` (path-traversal + null-byte injection); reject the v1.x default `logos/sb-large.png` case-insensitively (defense-in-depth against installs that missed migration 809 — case-insensitive because Windows + macOS filesystems would otherwise let `Logos/SB-Large.PNG` slip through and still resolve to the missing file on Linux-hosted panels); `is_file()` against `SB_THEMES.<config.theme>/<value>` (theme tree on disk) — fall back on miss; otherwise pass through. **Fail-closed on missing `SB_THEMES`**: `themesRoot()` raises `LogicException` if the constant isn't defined (init.php sets it; anything calling `BrandLogo` without `init.php` is a programmer error and must surface loudly rather than silently returning the fallback). The admin Settings page (`page_admin_settings_settings.tpl`) deliberately renders the RAW configured value so operators can see + fix a broken pointer; only the render paths (`core/header.php` + `page.login.php`) consume the resolver. **Silent-fallback indicator** (#1480 review finding 5): the admin Settings page also surfaces a red warning chip (`[data-testid="setting-warning-template.logo"]`) next to the input when the configured value is non-empty AND the resolver is falling back — without this an operator who customised the path has no signal that their customisation is inactive. The indicator is computed in `web/pages/admin.settings.php` as `trim($rawLogo) !== '' && trim($rawLogo) !== BrandLogo::DEFAULT_PATH && BrandLogo::resolve() === BrandLogo::DEFAULT_PATH` and passed to the template via `AdminSettingsView::$config_logo_using_fallback`. Pre-fix the chrome read `Config::get('template.logo')` directly and shipped a broken `<img>` on three reachable input shapes (the v1.x default that never shipped in the v2.0 default theme, empty / null / missing row, custom paths to deleted files). **Paired surfaces (every site that hardcodes a SourceBans++ brand-mark image path)**: (1) `web/install/includes/sql/data.sql` (fresh-install seed for `template.logo`); (2) `web/updater/data/809.php` (upgrade-path forward-conversion from the v1.x default; pinned to `BrandLogo::V1_DEFAULT_PATH` / `BrandLogo::DEFAULT_PATH` literals at the call site); (3) `web/themes/default/core/header.tpl` (favicon `<link rel="icon">` tags — `{$theme_url}/images/favicon.svg` for the panel chrome); (4) `web/themes/default/install/_chrome.tpl` (favicon `<link rel="icon">` + the install wizard's brand `<img>` in the header — `../themes/default/images/favicon.svg`, hardcoded because the wizard runs against an unconfigured panel with no `Config::get`); (5) `web/themes/default/updater.tpl` (the updater wizard's brand `<img>`, hardcoded for the same reason as the install wizard); (6) `web/themes/default/page_admin_settings_settings.tpl` (the inline `<code>` reference in the help-text under the input — informational only); (7) `web/includes/View/LoginView.php` (docblock reference describing the resolver's fallback). If you move the shield to a new path, update (1) + (2) + (3) + (4) + (5) + (6) + (7) AND `BrandLogo::DEFAULT_PATH` in the same PR — and bump (2)'s migration number if the change ships in a release (per "Updater migrations" rules). The install wizard + updater hardcodes (4) + (5) are intentional and stay hardcoded — those surfaces have no `Config::get` available. Regression guards: `web/tests/integration/BrandLogoTest.php` covers every fallback branch + the v1.x-default rejection + leading-slash strip + path-traversal rejection + null-byte rejection + case-insensitive v1.x default rejection + migration 809 literal-pinning + fresh-install seed literal-pinning + valid round-trip. `web/tests/integration/BrandLogoChromeWiringTest.php` pins the wiring of `BrandLogo::resolve()` into `web/pages/core/header.php` (`$theme->assign('logo', …)` ships the resolved value, not the raw `Config::get`) AND `BrandLogo::resolveUrl()` into `web/pages/page.login.php` (the `LoginView::$brand_logo_url` property carries the resolved URL, not the pre-fix `themes/<theme>/<raw>` concatenation), AND covers the admin Settings page's `$config_logo_using_fallback` indicator matrix (6 cases: v1.x default flips warning, deleted file flips warning, valid custom path does not, empty does not, default itself does not, traversal indicator flips warning). |
 | Live-preview Markdown in a settings textarea | `system.preview_intro_text` JSON action + `web/themes/default/page_admin_settings_settings.tpl` (`.dash-intro-editor` / `.dash-intro-preview`) |
+| Regex-read `theme.conf.php` metadata for the admin Settings → Themes picker (without executing the manifest) | `Sbpp\Theme\ThemeConf` (`web/includes/Theme/ThemeConf.php`) — `parseDefine()` + `sanitizeLink()` / `sanitizeScreenshotFilename()`; wired from `web/pages/admin.settings.php` discovery loop (#1466). JSON theme preview (`api_system_sel_theme`) still `include`s the manifest. Regression: `web/tests/integration/ThemeConfParseTest.php`. |
 | Build an empty-state surface (first-run vs filtered, primary/secondary CTAs) | `.empty-state` rules in `web/themes/default/css/theme.css` + reference shapes in `page_servers.tpl`, `page_dashboard.tpl`, `page_bans.tpl`, `page_comms.tpl`, `page_admin_audit.tpl`, `page_admin_bans_protests.tpl`, `page_admin_bans_submissions.tpl` |
 | Subdivide an admin route into `?section=<slug>` URLs (servers, mods, groups, comms, settings, **admins**, **bans**) | `web/pages/admin.settings.php` is the long-standing reference; #1239 brought servers / mods / groups / comms onto the same shape; #1259 unified the chrome on the Settings-style vertical sidebar; #1275 brought admins (`admins` / `add-admin` / `overrides`) and bans (`add-ban` / `protests` / `submissions` / `import` / `group-ban`) onto the same shape, deleting the page-level ToC (`page_toc.tpl`) along the way so `?section=` is now the **only** sub-route nav contract. The shared partial is `web/themes/default/core/admin_sidebar.tpl` (parameterized on `tabs` / `active_tab` / `sidebar_id` / `sidebar_label`); `web/includes/View/AdminTabs.php` (`Sbpp\View\AdminTabs`) opens `<div class="admin-sidebar-shell">`, emits the `<aside>` + link list, opens `<div class="admin-sidebar-content">`, and the page handler closes both wrappers (`echo '</div></div>'`) AFTER `Renderer::render(...)`. Each `$sections` entry carries `slug` + `name` + `permission` + `url` + `icon` (Lucide name); the link emits `<a href="?p=admin&c=<page>&section=<slug>" data-testid="admin-tab-<slug>" aria-current="page">` — never `<button onclick="openTab(...)">` (the JS handler was deleted at #1123 D1). See "Sub-paged admin routes" in Conventions. |
 | Render sub-views inside a Pattern A section (e.g. protests / submissions current-vs-archive) | `?view=<slug>` query param + a server-rendered `.chip-row` of real anchors (each carries `data-active="true|false"` + `aria-selected`). Reference: the protests / submissions chip rows in `web/pages/admin.bans.php` (`?section=protests&view=archive` / `?section=submissions&view=archive`). Pre-#1275 the chips called `Swap2ndPane()` — a `web/scripts/sourcebans.js` helper deleted at #1123 D1, leaving them dead — and the page rendered both views simultaneously. The new shape only renders the active view's data path; back/forward and link sharing both work. |
@@ -3903,6 +4991,7 @@ contacting every contributor individually.
 | Trap PHP 8.1 null-into-scalar deprecations at runtime (the bits PHPStan can't see) | `web/tests/integration/Php82DeprecationsTest.php` (#1273) — process-isolated render harness with a stub Smarty + `set_error_handler` that promotes `E_DEPRECATED` / `E_USER_DEPRECATED` to `\ErrorException`. Mirrors the LostPasswordChromeTest stub-Smarty pattern; each test method runs in a separate process because the page handlers declare top-level helpers (`setPostKey()` etc.) that PHP can't redeclare in one process. Add a marquee route here whenever a new high-traffic page handler ships, especially if it reads nullable `:prefix_*` columns or `$_POST` / `$_GET` lookups. |
 | Pin the "every `:name` PDO placeholder needs as many `bind()` calls as occurrences" contract under native prepares | `web/tests/integration/SrvAdminsPdoParamTest.php` (#1314) — two methods. `testReusedNamedPlaceholderUnderNativePreparesIsRejected` issues a tiny `SELECT 1 ... WHERE aid = :sid OR aid = :sid` against `Sbpp\Db\Database` with one `bind()` and asserts it throws `HY093`; this is the contract pin (also a regression guard if anyone re-flips `EMULATE_PREPARES` back to `true`). `testAdminSrvadminsPageRendersWithoutPdoException` is the page-level regression guard for the actual #1314 fatal — process-isolated `require` of `pages/admin.srvadmins.php` with `?id=0` asserting no `PDOException` escapes. Mirrors the Php82DeprecationsTest stub-Smarty + process-isolation shape. |
 | Pin "dead v1.x JS call sites + their server-side feeders stay deleted" (the `<script>LoadServerHost(...)</script>` / `$data['unban_link']` / `$info['popup']` shapes the v2.0.0 `sourcebans.js` cutover left without a JS landing site) | `web/tests/integration/DeadJsCallSitesTest.php` (#1404) — three methods, 12 assertions. Per-file forbidden-substring map (`page.banlist.php` / `page.commslist.php` / `page.home.php` / `admin.admins.php` / `admin.groups.php`) scanned against the **comment-stripped** source of each handler via `php_strip_whitespace()`, so the cleanup's own `// #1404 — ...` explanatory comments (and pre-existing historical-context comments that name the dead helpers in passing) don't false-fire the gate. The Smarty half (`{$server_script nofilter}`, the `<div id="servers_{$group.gid}">` hydration slot, the "Servers populate via the legacy LoadServerHostPlayersList hook." placeholder copy) is pinned by `testDeadTemplateSidesStayDropped` (also comment-stripped via `{* *}`-regex). The View-DTO side (`Sbpp\View\AdminAdminsAddView::server_script` orphan property) is pinned independently by `testAdminAdminsAddViewDoesNotCarryServerScriptProperty` so the failure points at the View directly instead of cascading through SmartyTemplateRule. Pure file scanning — extends `PHPUnit\Framework\TestCase` (no DB / session / Smarty bring-up). Sister #1402 (rewire dead JS handlers) and #1403 (ShowBox→`window.SBPP.showToast` rewrite) extend the per-file forbidden-substring map as their PRs land. |
+| Pin "every `class="btn--*"` modifier carries the base `btn` token" structural contract | `web/tests/integration/ButtonClassChainTest.php` (#1448) — single-method parser-style sweep across `web/themes/`, `web/pages/`, `web/includes/View/`, `web/install/`, `web/updater/`, `web/api/handlers/`, AND `web/scripts/` + `web/themes/default/js/` for `*.tpl` / `*.php` / `*.js`. Strips Smarty `{* … *}` (default delimiters) and `-{* … *}-` (the non-default-delimiter shape used by `page_login.tpl` / `page_blockit.tpl` / `page_kickit.tpl` / `page_admin_servers_rcon.tpl`), PHP comments via `php_strip_whitespace()`, and JS `/* */` + `//` comments. Extracts every `class="…"` / `class='…'` attribute body (negative lookbehind on the `class` keyword skips name-prefixed `data-class=` / `aria-class=` shapes), splits on whitespace, and asserts every chain carrying a `btn--*` modifier also carries `btn`. Class attributes containing `{` (Smarty-conditional shapes) are skipped — the gate doesn't expand templates. Sanity-check assertions guard against `ROOT` / `scanRoots()` typos that would silently scan zero files. Sister gate to `DeadJsCallSitesTest`; same pure-file-scanning shape. The JS-side coverage (`web/themes/default/js/theme.js`'s `renderDrawerBody()` / `renderDrawerLoading()` / toast / Notes-pane delete chrome, plus the `web/scripts/sb.js` legacy `'btn ok'` button factory) is what makes the gate's "panel chrome" coverage actually structural — that file ships seven `<button class="btn btn--ghost btn--icon[ btn--xs]">` strings via runtime concatenation, and the regression guard would be papering over the live bug surface without it. |
 | Add an E2E spec                        | `web/tests/e2e/specs/<smoke|flows|a11y|responsive>/...` + `web/tests/e2e/pages/...` |
 | Add a route to the screenshot gallery  | `web/tests/e2e/specs/_screenshots.spec.ts` (`ROUTES` array) |
 | Tweak mobile (<=768px) chrome layout   | `web/themes/default/css/theme.css` — see the `#1207` `@media (max-width: 768px)` blocks for the canonical shapes (icon-only topbar search, full-width drawer + scroll lock). Sub-paged admin routes (servers / mods / groups / comms / settings / admins / bans) use the `<details open>` accordion in the `#1259` `@media (min-width: 1024px)` block (sidebar inline at `<1024px`, sticky 14rem rail at `>=1024px`); see "Sub-paged admin routes" in Conventions. |
@@ -3913,7 +5002,7 @@ contacting every contributor individually.
 | Keep the main sidebar sticky-pinned across the full document scroll (`<aside class="sidebar">`) | The structural half of #1271 lives in `web/themes/default/core/footer.tpl`: `<footer class="app-footer">` is rendered as the LAST flex column item of `<div class="main">`, INSIDE `<div class="app">`. `.sidebar`'s sticky containing block is `.app`; if the footer were a body-level sibling of `.app` (the pre-fix shape), `.app`'s height would fall short of the document by `footerHeight` and the sidebar would release at the bottom — brand cut off, on barely-tall pages (`docHeight - viewport ≤ footerHeight`, e.g. `?p=admin&c=audit` on the bare e2e seed) the entire scroll range would be in the release phase and the sidebar would track the scroll. Keeping the footer inside `.app` makes the sticky CB extend to the full document. The CSS half (`.sidebar { align-self: flex-start; }` from #1278) is defensive parity with `.admin-sidebar` and is RETAINED but not load-bearing on its own. The footer's `margin-top: auto` (`.app-footer` rule in `theme.css`) is the classic "sticky footer" pattern — pushes the footer to the bottom of `.main`'s flex column on short pages so the credit doesn't float halfway up the viewport. Regression guard: `web/tests/e2e/specs/responsive/sidebar-sticky.spec.ts` asserts strict `top===0` at scroll=`document.scrollHeight` on `?p=admin&c=bans` (the canonical tall page) AND on `?p=admin&c=audit` (the barely-tall page that historically presented the bug most visibly). |
 | Disable the chrome's slide-in / fade animations for `prefers-reduced-motion` users | `web/themes/default/css/theme.css` (`@media (prefers-reduced-motion: reduce)` global block — see the matching note in "Playwright E2E specifics" / Conventions). The block applies universally to `*, *::before, *::after` and is the right shape for *motion-of-state* (drawer slide-in, toast slide-in, chevron rotation). Two documented exceptions live next to their rules: the busy-button spinner (`.btn[data-loading="true"]::after`) and the skeleton shimmer (`.skel`), both essential feedback per WCAG 2.3.3 — without rotation the donut reads as a decorative ring, without sliding the gradient reads as a permanent placeholder. Each rule carries its own per-rule `@media (prefers-reduced-motion: reduce)` override that re-enables the animation with `!important` longhands so specificity wins over the universal `*::after` / `*` reset (#1362). If you ship a new animation, default to honouring the global reset; the per-rule exception only applies to motion that is itself the load-bearing feedback (without it, the affordance is silently broken — not just less lively). Regression guard for both exceptions: `web/tests/e2e/specs/flows/loading-animations.spec.ts`. |
 | Tell the browser to paint native UA surfaces (`<select>` dropdown panels, native scrollbars, `<input type="date|time|color">` pickers, autofill highlighting) in the matching scheme | `web/themes/default/css/theme.css` — the two `color-scheme` declarations on `:root` (`light`) and `html.dark` (`dark`) (#1309). Without these the chrome's dark tokens swap correctly for DOM-rendered surfaces, but anything painted in the browser's top-layer system UI ignores `html.dark` and renders light — most jarring on mobile where the native `<select>` picker full-screens. Regression guard: `web/tests/e2e/specs/a11y/color-scheme.spec.ts`. |
-| Apply the persisted theme to `<html>` BEFORE first paint (no FOUC on every page navigation) | `web/themes/default/core/header.tpl` — the inline `<script>` block in `<head>`, immediately above `<link rel="stylesheet">` (#1367). Reads `localStorage['sbpp-theme']` (mirror of `THEME_KEY` in `theme.js`), resolves dark via the same predicate as `applyTheme(currentTheme())`, adds `class="dark"` to `<html>` synchronously before `<body>` parses. Pre-fix theme.js (loaded from the document tail via `core/footer.tpl`) was the only thing flipping the class — by then the body had already painted in light mode and the class flip triggered a full repaint the user perceived as a white flash + content flicker on every page navigation (the reporter's exact symptom on #1367). The bootloader's resolution logic must stay byte-equivalent to `theme.js`'s `applyTheme(currentTheme())` minus the `localStorage.setItem(...)` write — drift between the two means the first paint resolves to one theme, theme.js's boot-time call resolves to another, and the user sees flicker even with the bootloader present. See "Anti-FOUC theme bootloader" in Conventions. Regression guard: `web/tests/e2e/specs/flows/theme-fouc.spec.ts` uses `page.route` to stall the `theme.js` network request and asserts the state of `<html>`'s class list WHILE theme.js is held — proving the bootloader, not theme.js, did the class flip. Three arms cover the three branches of the resolution logic (dark-pinned must read `class="dark"`, light-pinned must NOT, system + emulated OS-dark via `colorScheme: 'dark'` on a fresh `chromium.newContext()` must read `class="dark"` via the matchMedia branch). Releasing the route then lets theme.js boot normally so the post-load shape is asserted too. |
+| Apply the persisted theme to `<html>` BEFORE first paint (no FOUC on every page navigation; covers BOTH the chrome and the chromeless `<head>` surfaces — iframes, upload popups, the updater wizard) | Five template surfaces ship the same inline `<script>` block in `<head>`, immediately above `<link rel="stylesheet">`: `web/themes/default/core/header.tpl` (chrome, every `index.php?p=…` render — #1367), `web/themes/default/page_kickit.tpl` and `web/themes/default/page_blockit.tpl` (the two iframe-routed surfaces under `pages/admin.kickit.php` / `pages/admin.blockit.php` that ship their own self-contained `<head>` rather than riding the chrome — #1438), `web/themes/default/page_uploadfile.tpl` (the popup window opened by `pages/admin.upload{demo,icon,mapimg}.php` via `window.open(...)` from a dark-mode-aware parent admin page — #1438 follow-up), and `web/themes/default/updater.tpl` (the standalone wizard rendered by `web/updater/index.php` on every panel upgrade — #1438 follow-up). All five copies read `localStorage['sbpp-theme']` (mirror of `THEME_KEY` in `theme.js`), resolve dark via the same predicate as `applyTheme(currentTheme())`, mirror the preference to `<html data-theme-pref="...">` (drives the theme toggle's tri-state sun / moon / monitor icon CSS in `theme.css` — #1185 follow-up; pre-followup the icon CSS gated on `html.dark` so "system" mode was visually indistinguishable from whichever of light/dark the OS resolved to), and add `class="dark"` to `<html>` synchronously before `<body>` parses. Pre-#1367 theme.js (loaded from the document tail via `core/footer.tpl`) was the only thing flipping the class on the chrome — by then the body had already painted in light mode and the class flip triggered a full repaint the user perceived as a white flash + content flicker on every page navigation. Pre-#1438 the chromeless surfaces had NO theme-resolution path at all — none of them load `theme.js` — so a dark-mode operator right-clicking a player → "Kick player" navigated to a stark-white full-page kickit document; same shape for the upload popup over a dark-mode parent and the updater landing page during a post-upgrade flow. All four bugs are the same shape: the page paints in light because nothing has set the dark class yet. The bootloader's resolution logic must stay byte-equivalent across all five copies (the integration test below enforces whitespace-normalized byte-equivalence — drift between copies means a user navigating between sibling pages sees the theme flicker mid-flow) AND semantically equivalent to `theme.js`'s `applyTheme(currentTheme())` minus the `localStorage.setItem(...)` write (the bootloader is intentionally more defensive — adds a `window.matchMedia &&` null check and a broader `try/catch` — but the resolution rule itself must mirror theme.js, otherwise the first paint resolves to one theme and theme.js's boot-time call resolves to another). See "Anti-FOUC theme bootloader" in Conventions. Regression guards: `web/tests/e2e/specs/flows/theme-fouc.spec.ts` (chrome — stalls `theme.js` via `page.route` and asserts `<html>`'s class WHILE theme.js is held, proving the bootloader did the flip; three arms cover dark-pinned / light-pinned / system + emulated OS-dark via `colorScheme: 'dark'` on a fresh `chromium.newContext()`) plus `web/tests/e2e/specs/flows/iframe-anti-fouc.spec.ts` (#1438 — kickit + blockit + uploadfile; simpler shape because none of those templates load `theme.js`, so a plain `page.goto(URL)` + `toHaveClass(/dark/)` is sufficient; six chromium tests cover kickit dark + light + system-OS-dark + system-OS-light, blockit dark, uploadfile dark; the system-OS-light arm specifically guards against the regression mode where the bootloader unconditionally adds `html.dark` regardless of `matchMedia(...).matches`) plus `web/tests/integration/IframeChromeAntiFoucBootloaderTest.php` (#1438 — static-grep gate covering all five template files, asserts every required bootloader fragment appears in each, the bootloader precedes `<link rel="stylesheet">` in each, the bootloader bodies are byte-equivalent across all five after whitespace normalization, and NO `*.tpl` file under `web/themes/default/install/` carries the bootloader — the install wizard runs against an unconfigured panel with no `localStorage` to read; catches drift edits that update one bootloader copy and forget the others). The updater surface is NOT covered by the E2E spec because the dev stack auto-seeds the DB out of band via `docker/db-init/`, so `web/updater/data/<N>.php` migrations are never applied via the runner in dev and hitting `/updater/` raises "Column already exists" on migration 801 — the static-grep integration test is the sufficient gate for that surface (the bootloader mechanism is identical across all five copies, enforced by the byte-equivalence test). |
 | Edit a step of the install wizard (chrome, form, schema-apply, admin-create, AMXBans import) | Page handlers under `web/install/pages/page.<N>.php` (1=license, 2=DB details, 3=requirements, 4=schema apply, 5=admin form + final config write, 6=optional AMXBans import). Each handler builds a `Sbpp\View\Install\Install*View` DTO from `web/includes/View/Install/` and renders the matching template under `web/themes/default/install/`. Shared step-handler helpers (prefix validation, raw-PDO probe before instantiating `\Database`, KeyValues quoting, friendly PDO error translation, filesystem-check detail strings) live in `web/install/includes/helpers.php` (`sbpp_install_validate_prefix` / `sbpp_install_open_db` / `sbpp_install_kv_escape` / `sbpp_install_translate_pdo_error` / `sbpp_install_describe_filesystem_check`) — required eagerly from `web/install/bootstrap.php` so every step page has them in scope without its own require. Every step (3-6) re-runs `sbpp_install_validate_prefix` at the top of its handler before any SQL substitution; step 6 also validates `amx_prefix` (operator input on that page itself). The `_chrome.tpl` / `_chrome_close.tpl` partials wrap every step (header + progress stepper + footer); they own the install-only inline CSS (`.install-shell`, `.install-alert`, `.install-pill`, `.install-grid`) since the wizard reuses the panel's `theme.css` design tokens but doesn't pull in the panel's chrome JS (`theme.js`, `lucide.min.js`, command palette, etc. — the wizard has no logged-in user / no Config / no `$userbank`). Steps with per-page tail scripts: step 1 (vanilla JS validating the license-accept checkbox), step 5 (#1335 M3: client-side validation for SteamID format + email shape + password match — saves the round-trip-with-wiped-passwords path on the common form-error case); the handoff template carries an inline auto-submit script. Navigation is plain HTML `<form action="?step=N">` everywhere else. Test-IDs follow `install-<step>-<field>` consistently (#1335 m3 standardised step 2's `install-db-*` shape onto the wider `install-database-*` pattern). Anti-pattern: reintroducing MooTools / `web/install/scripts/sourcebans.js` / `ShowBox()` / `$E()` / inline `onclick="next()"` — every legacy hook is dead post-#1123 D1, the rewrite at #1332 dropped them all (#1332). |
 | Tune install-wizard alert / pill colours (`.install-alert--*` / `.install-pill--*`) | Inline `<style>` block in `web/themes/default/install/_chrome.tpl` (#1435). The palette is pinned to the Tailwind 900-tier (`#14532d` green-900 / `#1e3a8a` blue-900 / `#78350f` amber-900 / `#7f1d1d` red-900) on `rgba(_, 0.15)` backgrounds so every variant clears WCAG AAA (~8:1 — well past AA's 4.5:1 floor). The pre-#1435 700/800-tier text on `rgba(_, 0.10)` bg failed AA on the success alert (~4.46:1) and surfaced to operators as "dark green text on light green box, hard to read". The `@media (prefers-color-scheme: dark)` block in the same file ONLY swaps text colours (NOT bgs) — the wizard has no `theme.js` / no toggle / no `html.dark` to ride, so the surrounding chrome stays light regardless of OS preference; swapping bgs would make alerts visually mismatch the rest of the wizard. Full OS-dark support is out of scope (would require `@media`-swapping every token `theme.css` owns). Regression guard: `web/tests/integration/InstallChromeContrastTest.php` — pins the new colour literals AND computes the WCAG contrast ratio for every variant arithmetically (text-on-composite-rgba-bg-over-page-bg) so a future palette tweak that drops below the 4.5:1 floor fails the gate even without the literal swap. The reference value test (`testContrastHelperMatchesReferenceValues`) cross-checks the implementation against a known WebAIM ratio (`#15803d` green-700 on `#f0fdf4` green-50 = 4.79:1). |
 | Recover from a missing `web/includes/vendor/` at install time | `web/install/recovery.php` is the self-contained "vendor/ missing" surface — pure inline HTML + CSS, NO Composer / Smarty / `Sbpp\…` dependency (#1332 C3). `web/install/index.php`'s lifecycle is paths-init (`init.php`) → C2 already-installed guard (`already-installed.php`, #1335) → vendor/-check (short-circuit to `recovery.php` if missing) → composer + Smarty bootstrap (`bootstrap.php`) → step dispatch (`includes/routing.php` → `pages/page.<N>.php`). The recovery surface is gated by `file_exists(PANEL_INCLUDES_PATH . '/vendor/autoload.php')` BEFORE any namespaced class is referenced. Direct visits with vendor present 302 to `/install/` instead of always emitting the 503 page (#1335 m1). The release artifact (post-#1332 Workstream A) bundles `vendor/` so this surface is the safety net for git checkouts and partial uploads, never the happy path. |

@@ -79,6 +79,7 @@ final class PermissionMatrixTest extends TestCase
             'bans.add_comment'            => ['perm' => 0, 'requireAdmin' => true,  'public' => false],
             'bans.edit_comment'           => ['perm' => 0, 'requireAdmin' => true,  'public' => false],
             'bans.remove_comment'         => ['perm' => ADMIN_OWNER, 'requireAdmin' => false, 'public' => false],
+            'bans.remove_demo'            => ['perm' => 0, 'requireAdmin' => true,  'public' => false],
             'bans.group_ban'              => ['perm' => ADMIN_OWNER | ADMIN_ADD_BAN, 'requireAdmin' => false, 'public' => false],
             'bans.ban_member_of_group'    => ['perm' => ADMIN_OWNER | ADMIN_ADD_BAN, 'requireAdmin' => false, 'public' => false],
             'bans.ban_friends'            => ['perm' => ADMIN_OWNER | ADMIN_ADD_BAN, 'requireAdmin' => false, 'public' => false],
@@ -177,6 +178,9 @@ final class PermissionMatrixTest extends TestCase
             'system.apply_theme'              => ['perm' => ADMIN_OWNER | ADMIN_WEB_SETTINGS, 'requireAdmin' => false, 'public' => false],
             'system.clear_cache'              => ['perm' => ADMIN_OWNER | ADMIN_WEB_SETTINGS, 'requireAdmin' => false, 'public' => false],
             'system.preview_intro_text'       => ['perm' => ADMIN_OWNER | ADMIN_WEB_SETTINGS, 'requireAdmin' => false, 'public' => false],
+            // #1455: SMTP test-email button — only operators who can edit
+            // SMTP credentials have a reason to trigger the verification send.
+            'system.test_email'               => ['perm' => ADMIN_OWNER | ADMIN_WEB_SETTINGS, 'requireAdmin' => false, 'public' => false],
         ];
     }
 

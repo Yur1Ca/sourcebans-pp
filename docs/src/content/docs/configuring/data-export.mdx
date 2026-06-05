@@ -1,0 +1,347 @@
+---
+title: Full data export
+description: Stream a one-shot ZIP bundle of every panel row and uploaded demo, either as a browser download or via a presigned S3 PUT URL.
+sidebar:
+  order: 2
+  label: Full data export
+---
+
+import { Aside, Code, Tabs, TabItem } from '@astrojs/starlight/components';
+
+The panel ships a built-in "Full data export" surface that produces a
+one-shot ZIP bundle of every database row plus every uploaded demo.
+Use it for:
+
+- Backups. The bundle is self-contained.
+- Migration to a different host.
+- Downstream analytics. The JSONL is one row per line with a stable schema.
+
+<Aside type="caution">
+The bundle contains the **full panel dataset**: admin emails, IP
+addresses, every Steam ID, unban reasons, comments, and notes.
+**Password hashes are never exported.** The bundle is still
+high-sensitivity PII. Use encrypted storage and short-lived
+presigned URLs. Don't post the URL anywhere public.
+</Aside>
+
+## Permission
+
+Export is gated on `OWNER` only. There's no delegated flag: the
+bundle covers every row, so a delegated holder is functionally an
+owner anyway. To share read-only data with a non-owner, generate
+the bundle yourself and hand them just the rows they need.
+
+Reach the surface from:
+
+- Sidebar: **Admin → Export** (owner-only).
+- Command palette (Ctrl/Cmd+K): "Data export".
+- Direct URL: `?p=admin&c=export`.
+
+## What's in the bundle
+
+Every bundle is a Zip64 archive with this layout:
+
+```
+sbpp-export-<uuid>.zip
+├── manifest.json
+├── entities/
+│   ├── admins.jsonl
+│   ├── admins_servers_groups.jsonl
+│   ├── banlog.jsonl
+│   ├── bans.jsonl
+│   ├── comms.jsonl
+│   ├── comments.jsonl
+│   ├── demos.jsonl
+│   ├── groups.jsonl
+│   ├── log.jsonl
+│   ├── mods.jsonl
+│   ├── notes.jsonl
+│   ├── overrides.jsonl
+│   ├── protests.jsonl
+│   ├── server_groups.jsonl
+│   ├── servers.jsonl
+│   ├── servers_groups.jsonl
+│   ├── settings.jsonl
+│   ├── srvgroups.jsonl
+│   ├── srvgroups_overrides.jsonl
+│   └── submissions.jsonl
+└── demos/
+    ├── <filename>.dem
+    └── ...
+```
+
+`manifest.json` is always the first central-directory entry, so
+consumers can read it without slurping the whole bundle. Fields:
+
+- `format_version`: integer (currently `1`). Bumps trigger a
+  documented consumer-side migration.
+- `bundle_id`: UUIDv4 string. Unique per attempt. Logged in the
+  audit trail.
+- `created_at`: integer unix seconds (UTC).
+- `panel_version`: string matching the panel chrome's
+  `data-version` footer hook.
+- `row_counts`: dict of `<entity>: <int>`. Lets a consumer
+  size-check before parsing.
+- `demo_total_bytes`: integer. Sum of every demo on disk in
+  this bundle.
+- `estimated_bundle_bytes`: integer. The pre-flight bundle-size
+  estimate. Compared against `cap_bytes` to populate `exceeds_cap`
+  for S3 mode; informational on a direct ZIP download (which has
+  no cap).
+- `cap_bytes`: integer. The S3 PUT cap in bytes (5 GiB minus
+  the 64 MiB safety margin). Informational on a ZIP
+  direct-download bundle (ZIP download is uncapped under
+  Zip64); load-bearing on the S3 form's UX gate.
+- `exceeds_cap`: bool. True when `estimated_bundle_bytes`
+  exceeds `cap_bytes`. The S3 submit button is disabled when
+  true; the ZIP submit button is always available regardless.
+- `pii_policy`: dict declaring what's in scope:
+  - `includes_admin_emails: true`
+  - `includes_ip_addresses: true`
+  - `includes_chat_messages: false` (the panel doesn't store
+    chat messages).
+  - `includes_steam_ids: true`
+  - `includes_unban_reasons: true`
+  - `password_hashes: "never"`. Operator attestation. Always
+    literally `"never"`.
+
+### JSONL wire format
+
+Each `entities/<entity>.jsonl` is one JSON object per line, with a
+trailing newline:
+
+```jsonl
+{"id":42,"user":"alice","authid":"76561197960265728","authid_steam2":"STEAM_0:0:1","created":1717000000,"email":null,"immunity":99}
+{"id":43,"user":"bob","authid":"76561197960265729","authid_steam2":"STEAM_0:1:1","created":1717000100,"email":"bob@example.test","immunity":50}
+```
+
+Contracts:
+
+- **`null` for absent values.** Never an empty string, never an
+  omitted field. Consumers can iterate `Object.keys()` confident
+  the set is stable per entity.
+- **Timestamps are unix-seconds integers (UTC).** `created`,
+  `ends`, `RemovedOn`, etc. all share this shape regardless of
+  the source column type.
+- **Steam64 IDs are decimal strings** (`"76561197960265728"`),
+  not JSON numbers. Steam64 exceeds JavaScript's
+  `Number.MAX_SAFE_INTEGER`. The `authid_steam2` field carries
+  the legacy `STEAM_X:Y:Z` shape.
+- **Source primary keys are renamed to `id`** (`admins.aid` →
+  `id`, `bans.bid` → `id`, etc.). Cross-entity foreign keys keep
+  their original names so the graph is recoverable.
+
+### Per-entity derivations
+
+A few entities carry derived fields:
+
+- `comms.mute_kind`: `"mute"`, `"gag"`, `"silence"`, or
+  `"unknown"` (from `:prefix_comms.type` 1/2/3). `type_raw` is
+  the source int.
+- `bans.state`: `"active"`, `"expired"`, `"unbanned"`,
+  `"deleted"`, or `"permanent"`. Same classifier the banlist
+  page uses. `RemoveType` / `removed_by` / `removed_on` /
+  `ureason` are preserved verbatim.
+- `bans.demo_filename` / `bans.demo_size_bytes` (and the same
+  pair on `submissions`): set when a `:prefix_demos` row
+  references the ban; `null` otherwise.
+- `log.level`: `"message"`, `"warning"`, or `"error"` (from
+  `:prefix_log.type` `m`/`w`/`e`). `actor_user` and `actor_steam`
+  are joined from `:prefix_admins` when `aid` is non-null.
+
+### What's never in the bundle
+
+These fields are stripped at the SQL layer and never reach the
+JSONL, regardless of permission:
+
+- `admins.password` (bcrypt hash).
+- `admins.validate` / `admins.attempts` / `admins.lockout_until`
+  (password-reset token + lockout state).
+- `servers.rcon` (RCON password).
+- `settings` rows keyed `smtp.pass` (SMTP credential) or
+  `telemetry.instance_id` (panel-local).
+
+The forbidden list is hard-coded in
+`web/includes/Export/EntityExporter.php`. Relaxing it (e.g. for a
+"full backup including hashes" workflow) is unsupported and
+silently invalidates the manifest's `password_hashes: "never"`
+attestation.
+
+## Two delivery modes
+
+The form ships two submit buttons:
+
+<Tabs>
+<TabItem label="ZIP download">
+
+The browser downloads the bundle directly. Apache streams from
+`php://output` so the progress bar moves in real time. No on-disk
+staging file. Closing the tab aborts cleanly.
+
+**Use for**: ad-hoc backups, one-off audits, debugging a row's
+wire shape.
+
+**Skip when**: the bundle is multi-GiB and your network is flaky
+(the connection has to stay open for the full transfer; abort and
+you start over). Use S3 mode instead.
+
+</TabItem>
+<TabItem label="S3 presigned PUT">
+
+The panel stages the bundle to a temp file under `cache/exports/`,
+then HTTPS-PUTs it to your presigned URL. The PUT is
+server-to-server. You get a redirect-back toast on completion.
+The staging file is unlinked once the upload acknowledges.
+
+**Use for**: scheduled backups, multi-GiB bundles, hand-off to
+cloud analytics.
+
+**Skip when**: you don't have an S3-compatible destination. AWS
+S3, Cloudflare R2, MinIO, Wasabi, Backblaze B2 all work. Raw FTP
+/ SCP / Dropbox don't.
+
+<Aside type="caution">
+The presigned URL is a **single-use write credential**. Anyone
+with the URL can PUT to your bucket until it expires. Use a
+short expiry (1 hour or less), generate fresh per export, and
+never paste it into chat, public logs, or issue trackers.
+</Aside>
+
+</TabItem>
+</Tabs>
+
+## Generating a presigned PUT URL
+
+Pick the workflow that matches your destination:
+
+<Tabs>
+<TabItem label="AWS S3">
+
+```bash
+aws s3 presign \
+    s3://your-bucket/path/sbpp-export.zip \
+    --http-method PUT \
+    --expires-in 3600
+```
+
+The output is the presigned URL. Paste it into the panel form.
+Valid for one hour (3600 seconds).
+
+</TabItem>
+<TabItem label="Cloudflare R2">
+
+R2 uses the same SigV4 signing as AWS S3. With the `aws` CLI
+configured against an R2 token:
+
+```bash
+aws s3 presign \
+    s3://your-r2-bucket/path/sbpp-export.zip \
+    --http-method PUT \
+    --expires-in 3600 \
+    --endpoint-url https://<account-id>.r2.cloudflarestorage.com
+```
+
+The R2 dashboard's "Generate URL" tool and `wrangler r2 object put
+--presign` also work.
+
+</TabItem>
+<TabItem label="MinIO">
+
+MinIO ships its own `mc` client:
+
+```bash
+mc alias set myminio https://minio.example.com ACCESS_KEY SECRET_KEY
+mc share upload --expire 1h myminio/your-bucket/path/sbpp-export.zip
+```
+
+`share upload` prints both a `curl` command and the raw URL. Copy
+just the URL into the panel form.
+
+</TabItem>
+</Tabs>
+
+## Cap (S3 mode only): 5 GiB minus 64 MiB safety margin
+
+S3 single-PUT is structurally limited to 5 GiB across every
+S3-API-compatible provider (AWS S3, Cloudflare R2, MinIO,
+Backblaze B2, Wasabi). Above 5 GiB the spec requires multipart
+upload, a different flow than presigned single-PUT, so the panel
+enforces a hard cap of 5 GiB minus a 64 MiB safety margin on the
+estimated bundle when the S3 button is used. The margin gives the
+writer headroom against last-minute compression-ratio surprises.
+
+ZIP direct download is **uncapped**. The archive is Zip64 in both
+modes, so the format itself has no structural size ceiling, and
+the operator's browser can stream a multi-tens-of-GB bundle if it
+needs to.
+
+When the cap is exceeded:
+
+- The S3 submit button is disabled.
+- The ZIP submit button stays available.
+- An empty-state block points at the ZIP path as the escape
+  hatch.
+- The cap is re-checked at the entry point on s3 mode, so a
+  stale-tab S3 POST also bounces; ZIP mode never enforces it.
+
+For a genuinely larger dataset on S3, either prune the demos
+directory of anything not under active appeal before running, or
+use ZIP download instead. A future version may add chunked /
+multipart S3 upload.
+
+## Audit log
+
+Every attempt (success or failure) lands a row in
+`?p=admin&c=audit`. The row carries:
+
+- The acting admin's `aid` and Steam ID.
+- The mode (`zip` or `s3`).
+- The bundle's UUIDv4.
+- On success: estimated and actual bundle byte count.
+- On failure: the `ExportError` code (e.g. `cap_exceeded`,
+  `s3_put_failed`, `presign_invalid_url`) and a truncated copy
+  of the underlying error message.
+
+If you forward audit logs to a SIEM, treat each successful export
+as a PII-class data flow.
+
+## Security model
+
+| Aspect | Contract |
+| ------ | -------- |
+| Permission | `OWNER` only. Not configurable. |
+| CSRF | Required on every POST. |
+| Transport (ZIP) | TLS where the panel is reachable via TLS. |
+| Transport (S3) | `https://` only. The panel refuses `http://` server-side. |
+| Password hashes | Never emitted. SQL filter. |
+| Audit | Every attempt logged with admin + bundle ID + outcome. |
+| Staging file | Removed on upload completion or process exit. |
+| Presigned URL | Single-use. Operator generates; panel uses once. Not stored. |
+
+## Troubleshooting
+
+**"Bundle exceeds the 5 GiB S3 PUT limit"**
+:   The S3 mode is capped at 5 GiB per single PUT (provider
+    limit; not arbitrary). Switch to direct ZIP download (no
+    cap, Zip64 enabled) or prune demos before retrying.
+
+**"Presigned URL must use HTTPS"**
+:   You pasted an `http://` URL. Regenerate with HTTPS. Cleartext
+    transit is unsupported.
+
+**"S3 rejected the upload"**
+:   Audit log carries the HTTP status and response. Common
+    causes: URL expired (regenerate with longer expiry), SigV4
+    signature mismatch (clock skew; sync NTP), bucket policy
+    denies PUT.
+
+**ZIP download stops partway through**
+:   You closed the tab (the audit log shows a truncated bundle
+    for that aid). ZIP download is uncapped (Zip64), so
+    `cap_exceeded` never fires on this path. The connection has
+    to stay open for the full transfer.
+
+**Want a partial export (just bans, not demos)**
+:   Not supported by the form. V1 is one-shot full-dataset.
+    Extract what you need from the bundle:
+    `unzip sbpp-export-*.zip entities/bans.jsonl`.

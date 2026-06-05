@@ -240,29 +240,46 @@ test.describe('flow: server-player right-click context menu (#PLAYER_CTX_MENU)',
         // — the menu's load-bearing payload.
         //
         // The Ban href rides the panel-chromed smart-default URL
-        // (`?p=admin&c=bans&section=add-ban&steam=…`) consumed by
-        // `Sbpp\View\AdminBansAddView::prefill_steam` server-side.
-        // #1395 unified Block onto the same panel-route shape
-        // (`?p=admin&c=comms&steam=…`) — pre-fix it pointed at
-        // `pages/admin.blockit.php?check=…` which is the
-        // post-`Actions.CommsAdd` rcon-fan-out iframe target, not a
-        // stand-alone operator surface; hitting it directly rendered
-        // chromeless and POSTed to a 404. The integration tests
-        // (`AdminBansAddSmartDefaultTest` /
+        // (`?p=admin&c=bans&section=add-ban&steam=…&name=…`) consumed
+        // by `Sbpp\View\AdminBansAddView::prefill_steam` /
+        // `prefill_name` server-side. #1395 unified Block onto the
+        // same panel-route shape (`?p=admin&c=comms&steam=…&name=…`)
+        // — pre-fix it pointed at `pages/admin.blockit.php?check=…`
+        // which is the post-`Actions.CommsAdd` rcon-fan-out iframe
+        // target, not a stand-alone operator surface; hitting it
+        // directly rendered chromeless and POSTed to a 404. The
+        // integration tests (`AdminBansAddSmartDefaultTest` /
         // `AdminCommsAddSmartDefaultTest`) cover the prefill
         // allowlist + form-input round-trip; this assertion is the
         // wire-level contract that the menu actually emits the URL
         // shape those handlers consume.
         //
+        // Issue #1440 added `&name=…` to the Ban / Block URLs so
+        // the form's Nickname input pre-fills alongside the
+        // SteamID one. Kick stays unchanged — `pages/admin.kickit.php`
+        // doesn't need the nickname (it's a one-shot RCON command
+        // keyed on SteamID); adding the param would just be noise.
+        //
         // Kick stays on the iframe path (`pages/admin.kickit.php`)
         // because it's a one-shot RCON command with no persistent
-        // panel surface to anchor on after firing.
+        // panel surface to anchor on after firing. #1439 added the
+        // `&mode=kick` qualifier so the iframe can tell this
+        // standalone kick-only flow apart from the post-ban kick
+        // (which embeds the same iframe in `admin.bans.php`'s "Ban
+        // Added" success dialog with `&mode=ban` / no `mode` param).
+        // The handler branches on `mode` to (a) skip the
+        // `:prefix_bans` UPDATE that's only meaningful for post-ban
+        // kicks and (b) emit the matching rcon message ("You have
+        // been kicked from this server" vs "You have been banned by
+        // this server, …"). #1439's reporter had the wrong message
+        // surfacing on the kick-only flow because the URL the
+        // context menu emitted carried no mode signal.
         await expect(menu.locator('[data-testid="context-menu-kick"]'))
-            .toHaveAttribute('href', /^pages\/admin\.kickit\.php\?check=STEAM_0%3A0%3A1234&type=0$/);
+            .toHaveAttribute('href', /^pages\/admin\.kickit\.php\?check=STEAM_0%3A0%3A1234&type=0&mode=kick$/);
         await expect(menu.locator('[data-testid="context-menu-ban"]'))
-            .toHaveAttribute('href', /^index\.php\?p=admin&c=bans&section=add-ban&steam=STEAM_0%3A0%3A1234&type=0$/);
+            .toHaveAttribute('href', /^index\.php\?p=admin&c=bans&section=add-ban&steam=STEAM_0%3A0%3A1234&type=0&name=Alice$/);
         await expect(menu.locator('[data-testid="context-menu-block"]'))
-            .toHaveAttribute('href', /^index\.php\?p=admin&c=comms&steam=STEAM_0%3A0%3A1234&type=0$/);
+            .toHaveAttribute('href', /^index\.php\?p=admin&c=comms&steam=STEAM_0%3A0%3A1234&type=0&name=Alice$/);
 
         // View profile builds a SteamID64 from the SteamID2:
         // `76561197960265728 + 2*Z + Y` -> 76561197960268196 for
@@ -274,6 +291,53 @@ test.describe('flow: server-player right-click context menu (#PLAYER_CTX_MENU)',
         // close path removes the DOM node, not just toggles `hidden`.
         await page.keyboard.press('Escape');
         await expect(menu).toHaveCount(0);
+    });
+
+    /**
+     * Issue #1440 — names with special characters (Unicode / spaces /
+     * symbols) must round-trip through `encodeURIComponent` so the
+     * `?name=…` parameter on the panel-chromed Ban / Block URLs is
+     * URL-safe regardless of what Steam serves up. The pre-fix bug
+     * was just "name missing"; this is the regression guard that
+     * future fixes don't accidentally drop the param on non-ASCII /
+     * shell-special names.
+     */
+    test('encodes special characters in the name parameter (#1440)', async ({ page }) => {
+        await truncateE2eDb();
+        const seeded = await seedServerViaApi(page);
+        // Name with a space, ampersand (URL-special), and a Japanese
+        // codepoint. `encodeURIComponent` turns each into the
+        // percent-escaped form. The wire-layer regex below pins the
+        // exact byte sequence the menu emits.
+        await stubHostPlayers(
+            page,
+            seeded,
+            [{ name: 'Bob & 日本', steamid: 'STEAM_0:0:1234', frags: 5, time_f: '08:32' }],
+            /* canBanPlayer */ true,
+        );
+
+        await page.goto('/index.php?p=servers&s=0');
+
+        const tile = page.locator('[data-testid="server-tile"]').first();
+        await expect(tile).toHaveAttribute('data-status', 'online');
+
+        const playerRow = tile.locator(
+            '[data-testid="server-player"][data-context-menu="server-player"]',
+        ).first();
+        await playerRow.dispatchEvent('contextmenu');
+
+        const menu = page.locator('[data-testid="server-context-menu"]');
+        await expect(menu).toBeVisible();
+
+        // The literal `encodeURIComponent('Bob & 日本')` emits
+        // `Bob%20%26%20%E6%97%A5%E6%9C%AC`. Pin exactly that on the
+        // Ban / Block hrefs — a future regression that switched to
+        // (e.g.) the raw `+` for spaces or dropped multi-byte
+        // escaping would surface here.
+        await expect(menu.locator('[data-testid="context-menu-ban"]'))
+            .toHaveAttribute('href', /&name=Bob%20%26%20%E6%97%A5%E6%9C%AC$/);
+        await expect(menu.locator('[data-testid="context-menu-block"]'))
+            .toHaveAttribute('href', /&name=Bob%20%26%20%E6%97%A5%E6%9C%AC$/);
     });
 
     test('omits the kick / ban / block items when can_ban_player=false', async ({ page }) => {
@@ -384,9 +448,13 @@ test.describe('flow: server-player right-click context menu (#PLAYER_CTX_MENU)',
         await expect(menu).toBeVisible();
         await expect(menu.locator('.context-menu__header')).toHaveText('Fletcher');
         // The menu should target THIS player — kick / ban URLs
-        // carry Fletcher's SteamID, not the second player's.
+        // carry Fletcher's SteamID, not the second player's. The
+        // `&mode=kick` qualifier (#1439) rides along; without it
+        // the iframe would surface the "You have been banned" rcon
+        // message + UPDATE the ban row on a flow that never
+        // intended to ban anyone.
         await expect(menu.locator('[data-testid="context-menu-kick"]'))
-            .toHaveAttribute('href', /check=STEAM_0%3A0%3A1234/);
+            .toHaveAttribute('href', /check=STEAM_0%3A0%3A1234.*mode=kick/);
 
         await page.keyboard.press('Escape');
         await expect(menu).toHaveCount(0);
